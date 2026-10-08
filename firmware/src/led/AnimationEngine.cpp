@@ -2,6 +2,9 @@
 
 namespace {
 constexpr uint8_t FULL_LEVEL = 255;
+constexpr uint32_t MIN_WATERFALL_PIXEL_FADE_MS = 120;
+constexpr uint32_t MAX_WATERFALL_PIXEL_FADE_MS = 400;
+constexpr uint8_t WATERFALL_FADE_WIDTH_PIXELS = 8;
 }
 
 AnimationEngine::AnimationEngine(LedController& leds,
@@ -9,13 +12,25 @@ AnimationEngine::AnimationEngine(LedController& leds,
     : leds_(leds), config_(config) {}
 
 void AnimationEngine::begin(const uint32_t nowMs) {
+  state_ = State::OFF;
   stateStartedAtMs_ = nowMs;
+  lastRenderedAtMs_ = UINT32_MAX;
+  for (uint8_t stripIndex = 0; stripIndex < MAX_STRIPS; ++stripIndex) {
+    stripLevels_[stripIndex] = 0;
+    fadeInStartLevels_[stripIndex] = 0;
+    fadeOutStartLevels_[stripIndex] = 0;
+    stripFadeInStartedAtMs_[stripIndex] = 0;
+    stripFadeInDurationsMs_[stripIndex] = 0;
+    stripStartLogged_[stripIndex] = false;
+  }
   leds_.clear();
   leds_.show();
-  Serial.println("All 4 strips OFF");
+  Serial.print("All ");
+  Serial.print(config_.stripCount);
+  Serial.println(" strips OFF");
 }
 
-void AnimationEngine::update(const uint32_t nowMs) {
+void AnimationEngine::update(const uint32_t nowMs, const bool motionActive) {
   if (lastRenderedAtMs_ == nowMs) {
     return;
   }
@@ -33,6 +48,12 @@ void AnimationEngine::update(const uint32_t nowMs) {
       }
       return;
     case State::ON:
+      if (motionActive) {
+        // The hold timer represents time since the PIRs last reported
+        // presence, not time since the cascade completed.
+        stateStartedAtMs_ = nowMs;
+        return;
+      }
       if (elapsedMs >= config_.holdMs) {
         startFadeOut(nowMs);
       }
@@ -56,11 +77,13 @@ void AnimationEngine::trigger(const Direction direction,
       Serial.print("Motion ");
       Serial.print(directionName(direction));
       Serial.print(" during cascade -> continuing ");
-      Serial.println(cascadeName(direction_));
+      printCascadeName();
+      Serial.println();
       return;
     case State::ON:
       stateStartedAtMs_ = nowMs;
-      Serial.println("Hold extended by motion");
+      Serial.print("Hold extended by motion ");
+      Serial.println(directionName(direction));
       return;
     case State::FADING_OUT:
       updateFadeOutLevels(nowMs - stateStartedAtMs_);
@@ -79,12 +102,16 @@ void AnimationEngine::startCascade(const Direction direction,
   cascadeDurationMs_ = 0;
 
   uint32_t nextStripStartMs = 0;
-  for (uint8_t orderPosition = 0; orderPosition < hardware::STRIP_COUNT;
+  for (uint8_t orderPosition = 0; orderPosition < config_.stripCount;
        ++orderPosition) {
     const uint8_t stripIndex = stripIndexAt(orderPosition);
     const uint8_t startLevel = stripLevels_[stripIndex];
+    const uint32_t fullDurationMs =
+        config_.enableWaterfall
+            ? waterfallStripDurationMs(config_.strips[stripIndex].pixelCount)
+            : config_.stripFadeInMs;
     const uint32_t durationMs =
-        scaledDuration(config_.stripFadeInMs, FULL_LEVEL - startLevel);
+        scaledDuration(fullDurationMs, FULL_LEVEL - startLevel);
 
     fadeInStartLevels_[stripIndex] = startLevel;
     stripFadeInStartedAtMs_[stripIndex] = nextStripStartMs;
@@ -98,12 +125,13 @@ void AnimationEngine::startCascade(const Direction direction,
   Serial.print("Motion ");
   Serial.print(directionName(direction_));
   Serial.print(" -> cascade ");
-  Serial.println(cascadeName(direction_));
+  printCascadeName();
+  Serial.println();
   logNewlyStartedStrips(0);
 }
 
 void AnimationEngine::startFadeOut(const uint32_t nowMs) {
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     fadeOutStartLevels_[stripIndex] = stripLevels_[stripIndex];
   }
@@ -117,32 +145,36 @@ void AnimationEngine::enterOn(const uint32_t nowMs) {
   state_ = State::ON;
   stateStartedAtMs_ = nowMs;
 
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     stripLevels_[stripIndex] = FULL_LEVEL;
   }
 
   renderLevels();
-  Serial.println("All 4 strips ON");
+  Serial.print("All ");
+  Serial.print(config_.stripCount);
+  Serial.println(" strips ON");
 }
 
 void AnimationEngine::enterOff(const uint32_t nowMs) {
   state_ = State::OFF;
   stateStartedAtMs_ = nowMs;
 
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     stripLevels_[stripIndex] = 0;
   }
 
   renderLevels();
-  Serial.println("All 4 strips OFF");
+  Serial.print("All ");
+  Serial.print(config_.stripCount);
+  Serial.println(" strips OFF");
 }
 
 void AnimationEngine::renderFadeIn(const uint32_t elapsedMs) {
   logNewlyStartedStrips(elapsedMs);
 
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     const uint32_t startsAtMs = stripFadeInStartedAtMs_[stripIndex];
     if (elapsedMs < startsAtMs) {
@@ -159,7 +191,61 @@ void AnimationEngine::renderFadeIn(const uint32_t elapsedMs) {
         (levelDistance * progress + FULL_LEVEL / 2) / FULL_LEVEL;
   }
 
-  renderLevels();
+  if (config_.enableWaterfall) {
+    renderWaterfallFadeIn(elapsedMs);
+  } else {
+    renderLevels();
+  }
+}
+
+void AnimationEngine::renderWaterfallFadeIn(const uint32_t elapsedMs) {
+  uint16_t stripStartPixel = 0;
+  const bool bottomToTop =
+      config_.waterfallDirection == WaterfallDirection::BOTTOM_TO_TOP;
+
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
+       ++stripIndex) {
+    const StripConfig& strip = config_.strips[stripIndex];
+    const uint8_t startLevel = fadeInStartLevels_[stripIndex];
+    const uint32_t startsAtMs = stripFadeInStartedAtMs_[stripIndex];
+    const uint32_t durationMs = stripFadeInDurationsMs_[stripIndex];
+
+    if (elapsedMs < startsAtMs) {
+      leds_.setRange(stripStartPixel, strip.pixelCount, startLevel);
+      stripStartPixel += strip.pixelCount;
+      continue;
+    }
+
+    const uint32_t stripElapsedMs = elapsedMs - startsAtMs;
+    const uint32_t pixelFadeDurationMs = min(
+        durationMs,
+        scaledDuration(waterfallPixelFadeMs(), FULL_LEVEL - startLevel));
+    const uint32_t travelDurationMs = durationMs - pixelFadeDurationMs;
+    const bool reverseLogicalOrder = strip.reversed != bottomToTop;
+
+    for (uint16_t order = 0; order < strip.pixelCount; ++order) {
+      const uint32_t pixelStartsAtMs =
+          strip.pixelCount <= 1
+              ? 0
+              : (static_cast<uint64_t>(travelDurationMs) * order) /
+                    (strip.pixelCount - 1);
+      const uint8_t progress =
+          stripElapsedMs < pixelStartsAtMs
+              ? 0
+              : fadeLevel(stripElapsedMs - pixelStartsAtMs,
+                          pixelFadeDurationMs);
+      const uint16_t levelDistance = FULL_LEVEL - startLevel;
+      const uint8_t level =
+          startLevel +
+          (levelDistance * progress + FULL_LEVEL / 2) / FULL_LEVEL;
+      const uint16_t logicalOffset =
+          reverseLogicalOrder ? strip.pixelCount - 1 - order : order;
+      leds_.setLogicalPixel(stripStartPixel + logicalOffset, level);
+    }
+    stripStartPixel += strip.pixelCount;
+  }
+
+  leds_.show();
 }
 
 void AnimationEngine::renderFadeOut(const uint32_t elapsedMs) {
@@ -170,7 +256,7 @@ void AnimationEngine::renderFadeOut(const uint32_t elapsedMs) {
 void AnimationEngine::updateFadeOutLevels(const uint32_t elapsedMs) {
   const uint8_t fadedAmount = fadeLevel(elapsedMs, config_.fadeOutMs);
 
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     const uint16_t remaining =
         fadeOutStartLevels_[stripIndex] * (FULL_LEVEL - fadedAmount);
@@ -180,15 +266,18 @@ void AnimationEngine::updateFadeOutLevels(const uint32_t elapsedMs) {
 }
 
 void AnimationEngine::renderLevels() {
-  for (uint8_t stripIndex = 0; stripIndex < hardware::STRIP_COUNT;
+  uint16_t startPixel = 0;
+  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
-    leds_.setStrip(config_.strips[stripIndex], stripLevels_[stripIndex]);
+    const StripConfig& strip = config_.strips[stripIndex];
+    leds_.setRange(startPixel, strip.pixelCount, stripLevels_[stripIndex]);
+    startPixel += strip.pixelCount;
   }
   leds_.show();
 }
 
 void AnimationEngine::logNewlyStartedStrips(const uint32_t elapsedMs) {
-  for (uint8_t orderPosition = 0; orderPosition < hardware::STRIP_COUNT;
+  for (uint8_t orderPosition = 0; orderPosition < config_.stripCount;
        ++orderPosition) {
     const uint8_t stripIndex = stripIndexAt(orderPosition);
     if (stripStartLogged_[stripIndex] ||
@@ -213,7 +302,28 @@ uint8_t AnimationEngine::stripIndexAt(const uint8_t orderPosition) const {
   if (direction_ == Direction::LEFT_TO_RIGHT) {
     return orderPosition;
   }
-  return hardware::STRIP_COUNT - 1 - orderPosition;
+  return config_.stripCount - 1 - orderPosition;
+}
+
+uint32_t AnimationEngine::waterfallPixelStepMs() const {
+  return max(1UL, (1000UL + config_.waterfallSpeedPps - 1) /
+                      config_.waterfallSpeedPps);
+}
+
+uint32_t AnimationEngine::waterfallPixelFadeMs() const {
+  return constrain(waterfallPixelStepMs() * WATERFALL_FADE_WIDTH_PIXELS,
+                   MIN_WATERFALL_PIXEL_FADE_MS,
+                   MAX_WATERFALL_PIXEL_FADE_MS);
+}
+
+uint32_t AnimationEngine::waterfallStripDurationMs(
+    const uint16_t pixelCount) const {
+  const uint32_t travelDurationMs =
+      pixelCount <= 1
+          ? 0
+          : (1000ULL * (pixelCount - 1) + config_.waterfallSpeedPps - 1) /
+                config_.waterfallSpeedPps;
+  return travelDurationMs + waterfallPixelFadeMs();
 }
 
 uint32_t AnimationEngine::scaledDuration(const uint32_t fullDurationMs,
@@ -237,7 +347,12 @@ const char* AnimationEngine::directionName(const Direction direction) {
   return direction == Direction::LEFT_TO_RIGHT ? "LEFT" : "RIGHT";
 }
 
-const char* AnimationEngine::cascadeName(const Direction direction) {
-  return direction == Direction::LEFT_TO_RIGHT ? "1->2->3->4"
-                                                : "4->3->2->1";
+void AnimationEngine::printCascadeName() const {
+  for (uint8_t orderPosition = 0; orderPosition < config_.stripCount;
+       ++orderPosition) {
+    if (orderPosition > 0) {
+      Serial.print("->");
+    }
+    Serial.print(stripIndexAt(orderPosition) + 1);
+  }
 }

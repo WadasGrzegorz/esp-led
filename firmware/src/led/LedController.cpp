@@ -9,11 +9,15 @@ LedController::LedController(CRGB* leds, const uint16_t controllerCount,
       logicalPixelCount_(logicalPixelCount) {}
 
 void LedController::begin(const uint8_t maxBrightness, const float gamma) {
-  gamma_ = gamma;
   FastLED.addLeds<WS2811, hardware::DATA_PIN, GRB>(leds_, controllerCount_);
-  FastLED.setBrightness(maxBrightness);
+  configure(maxBrightness, gamma);
   clear();
   show();
+}
+
+void LedController::configure(const uint8_t maxBrightness, const float gamma) {
+  gamma_ = gamma;
+  FastLED.setBrightness(maxBrightness);
 }
 
 void LedController::clear() {
@@ -28,22 +32,29 @@ void LedController::setAll(const uint8_t linearLevel) {
              CRGB(correctedLevel, correctedLevel, correctedLevel));
 }
 
-void LedController::setStrip(const StripConfig& strip,
+void LedController::setRange(const uint16_t startPixel,
+                             const uint16_t pixelCount,
                              const uint8_t linearLevel) {
   const uint8_t correctedLevel = gammaCorrect(linearLevel);
-  for (uint16_t localPixel = 0; localPixel < strip.pixelCount; ++localPixel) {
-    const uint16_t offset =
-        strip.reversed ? strip.pixelCount - 1 - localPixel : localPixel;
-    const uint16_t logicalPixel = strip.startPixel + offset;
+  for (uint16_t offset = 0; offset < pixelCount; ++offset) {
+    const uint16_t logicalPixel = startPixel + offset;
     if (logicalPixel >= logicalPixelCount_) {
-      continue;
+      return;
     }
-    setLogicalPixel(logicalPixel, correctedLevel);
+    setCorrectedLogicalPixel(logicalPixel, correctedLevel);
   }
 }
 
 void LedController::setLogicalPixel(const uint16_t logicalPixel,
-                                    const uint8_t correctedLevel) {
+                                    const uint8_t linearLevel) {
+  if (logicalPixel >= logicalPixelCount_) {
+    return;
+  }
+  setCorrectedLogicalPixel(logicalPixel, gammaCorrect(linearLevel));
+}
+
+void LedController::setCorrectedLogicalPixel(const uint16_t logicalPixel,
+                                             const uint8_t correctedLevel) {
   const uint16_t controller = logicalPixel / 3;
   if (controller >= controllerCount_) {
     return;

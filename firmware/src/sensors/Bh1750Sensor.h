@@ -2,16 +2,23 @@
 
 #include <Arduino.h>
 
+enum class Bh1750UpdateResult : uint8_t {
+  WAITING,
+  SAMPLE_READY,
+  IO_ERROR,
+};
+
 class Bh1750Sensor {
  public:
   Bh1750Sensor(uint8_t lowAddress, uint8_t highAddress,
                uint32_t readIntervalMs);
 
   bool begin(uint32_t nowMs);
-  bool update(uint32_t nowMs, float& lux);
+  Bh1750UpdateResult update(uint32_t nowMs, float& lux);
   uint8_t address() const;
 
  private:
+  bool initializeAddress(uint8_t address);
   bool probe(uint8_t address) const;
   bool sendCommand(uint8_t command) const;
 
