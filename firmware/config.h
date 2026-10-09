@@ -40,8 +40,10 @@ constexpr LightingConfig DEFAULT_LIGHTING_CONFIG = {
     80,     // maxBrightness (0-255)
     1680,   // stripFadeInMs
     0.80F,  // nextStripStartProgress
+    StripStartMode::CASCADE,
     3000,   // holdMs
     2640,   // fadeOutMs
+    FadeOutStyle::GLOBAL,
     2.2F,   // gamma
     true,   // enableWaterfall
     WaterfallDirection::TOP_TO_BOTTOM,

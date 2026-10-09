@@ -6,6 +6,8 @@
 #include "../led/AnimationEngine.h"
 #include "../led/LedController.h"
 #include "../mode/OperatingModeController.h"
+#include "../sensors/Bh1750Sensor.h"
+#include "../sensors/PirSensor.h"
 #include "../setup/SetupController.h"
 
 struct WebConfigDependencies {
@@ -14,6 +16,9 @@ struct WebConfigDependencies {
   OperatingModeController& operatingMode;
   AnimationEngine& animation;
   LedController& leds;
+  PirSensor& leftPir;
+  PirSensor& rightPir;
+  Bh1750Sensor& lightSensor;
   const bool& lightSensorAvailable;
   const bool& hasLuxReading;
   const float& currentLux;

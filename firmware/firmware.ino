@@ -52,7 +52,8 @@ bool normalRestartPrepared = false;
 
 const WebConfigDependencies webConfigDependencies = {
     configuration,         setupController, operatingMode, animation,
-    ledController,         lightSensorAvailable, hasLuxReading, currentLux};
+    ledController,         leftPir,         rightPir,      lightSensor,
+    lightSensorAvailable,  hasLuxReading,   currentLux};
 const WebConfigSettings webConfigSettings = {
     hardware::LOGICAL_PIXEL_COUNT,
     hardware::CONFIG_STRIP_TEST_TIMEOUT_MS,

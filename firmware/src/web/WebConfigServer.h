@@ -25,6 +25,8 @@ class WebConfigServer {
   void registerRoutes();
   void handleStatus();
   void handleGetConfig();
+  void handleExportConfig();
+  void handleImportConfig();
   void handlePutConfig();
   void handleSave();
   void handleReset();
@@ -34,6 +36,9 @@ class WebConfigServer {
   void handleCalibrationStart();
   void handleCalibrationMove();
   void handleCalibrationAction(const char* action);
+  void handleFirmwareUpload();
+  void handleFirmwareUploadComplete();
+  void failFirmwareUpload(const String& message);
   void handleNotFound();
 
   bool requireConfigMode();
@@ -51,6 +56,9 @@ class WebConfigServer {
   OperatingModeController& operatingMode_;
   AnimationEngine& animation_;
   LedController& leds_;
+  PirSensor& leftPir_;
+  PirSensor& rightPir_;
+  Bh1750Sensor& lightSensor_;
   const bool& lightSensorAvailable_;
   const bool& hasLuxReading_;
   const float& currentLux_;
@@ -63,7 +71,11 @@ class WebConfigServer {
   bool configurationChanged_ = false;
   bool animationTestActive_ = false;
   bool stripTestActive_ = false;
+  bool firmwareUploadStarted_ = false;
+  bool firmwareUploadFailed_ = false;
   bool restartScheduled_ = false;
+  size_t firmwareUploadBytes_ = 0;
+  String firmwareUploadError_;
   uint32_t stripTestEndsAtMs_ = 0;
   uint32_t restartAtMs_ = 0;
 };

@@ -1,8 +1,11 @@
 #include "WebConfigServer.h"
 
 #include <ESPmDNS.h>
+#include <Update.h>
 #include <WiFi.h>
+#include <esp_system.h>
 
+#include "../FirmwareInfo.h"
 #include "WebUi.h"
 
 namespace {
@@ -32,8 +35,10 @@ void writeConfig(JsonDocument& document, const LightingConfig& config) {
   document["maxBrightness"] = config.maxBrightness;
   document["stripFadeInMs"] = config.stripFadeInMs;
   document["nextStripStartProgress"] = config.nextStripStartProgress;
+  document["stripStartMode"] = stripStartModeName(config.stripStartMode);
   document["holdMs"] = config.holdMs;
   document["fadeOutMs"] = config.fadeOutMs;
+  document["fadeOutStyle"] = fadeOutStyleName(config.fadeOutStyle);
   document["gamma"] = config.gamma;
   document["enableWaterfall"] = config.enableWaterfall;
   document["waterfallDirection"] =
@@ -61,6 +66,44 @@ void sendDocument(WebServer& server, const uint16_t statusCode,
 bool deadlineReached(const uint32_t nowMs, const uint32_t deadlineMs) {
   return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
 }
+
+const char* resetReasonName(const esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON:
+      return "power-on";
+    case ESP_RST_EXT:
+      return "external-reset";
+    case ESP_RST_SW:
+      return "software-restart";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+      return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT:
+      return "task-watchdog";
+    case ESP_RST_WDT:
+      return "watchdog";
+    case ESP_RST_DEEPSLEEP:
+      return "deep-sleep";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    case ESP_RST_SDIO:
+      return "sdio";
+    case ESP_RST_USB:
+      return "usb";
+    case ESP_RST_JTAG:
+      return "jtag";
+    case ESP_RST_EFUSE:
+      return "efuse";
+    case ESP_RST_PWR_GLITCH:
+      return "power-glitch";
+    case ESP_RST_CPU_LOCKUP:
+      return "cpu-lockup";
+    case ESP_RST_UNKNOWN:
+      return "unknown";
+  }
+  return "unknown";
+}
 }  // namespace
 
 WebConfigServer::WebConfigServer(
@@ -71,6 +114,9 @@ WebConfigServer::WebConfigServer(
       operatingMode_(dependencies.operatingMode),
       animation_(dependencies.animation),
       leds_(dependencies.leds),
+      leftPir_(dependencies.leftPir),
+      rightPir_(dependencies.rightPir),
+      lightSensor_(dependencies.lightSensor),
       lightSensorAvailable_(dependencies.lightSensorAvailable),
       hasLuxReading_(dependencies.hasLuxReading),
       currentLux_(dependencies.currentLux),
@@ -153,6 +199,14 @@ void WebConfigServer::update(const uint32_t nowMs) {
 }
 
 void WebConfigServer::end() {
+  if (Update.isRunning()) {
+    Update.abort();
+  }
+  firmwareUploadStarted_ = false;
+  firmwareUploadFailed_ = false;
+  firmwareUploadBytes_ = 0;
+  firmwareUploadError_ = "";
+
   if (setup_.isCalibrationActive()) {
     setup_.cancelCalibration();
   } else if (setup_.isStripTestActive()) {
@@ -204,6 +258,10 @@ void WebConfigServer::registerRoutes() {
   server_.on("/api/status", HTTP_GET, [this]() { handleStatus(); });
   server_.on("/api/config", HTTP_GET, [this]() { handleGetConfig(); });
   server_.on("/api/config", HTTP_PUT, [this]() { handlePutConfig(); });
+  server_.on("/api/config/export", HTTP_GET,
+             [this]() { handleExportConfig(); });
+  server_.on("/api/config/import", HTTP_POST,
+             [this]() { handleImportConfig(); });
   server_.on("/api/save", HTTP_POST, [this]() { handleSave(); });
   server_.on("/api/reset", HTTP_POST, [this]() { handleReset(); });
   server_.on("/api/strip/test", HTTP_POST, [this]() { handleStripTest(); });
@@ -222,6 +280,9 @@ void WebConfigServer::registerRoutes() {
              [this]() { handleCalibrationAction("finish"); });
   server_.on("/api/calibration/cancel", HTTP_POST,
              [this]() { handleCalibrationAction("cancel"); });
+  server_.on("/api/firmware", HTTP_POST,
+             [this]() { handleFirmwareUploadComplete(); },
+             [this]() { handleFirmwareUpload(); });
   server_.onNotFound([this]() { handleNotFound(); });
 }
 
@@ -250,6 +311,29 @@ void WebConfigServer::handleStatus() {
   document["animationTestActive"] = animationTestActive_;
   document["stripTestActive"] = setup_.isStripTestActive();
 
+  JsonObject device = document["device"].to<JsonObject>();
+  device["firmwareVersion"] = LEDBOX_FIRMWARE_VERSION;
+  device["buildTimestamp"] = LEDBOX_BUILD_TIMESTAMP;
+  device["resetReason"] = resetReasonName(esp_reset_reason());
+  device["uptimeMs"] = nowMs;
+  device["freeHeapBytes"] = ESP.getFreeHeap();
+  device["minimumFreeHeapBytes"] = ESP.getMinFreeHeap();
+  device["sketchSizeBytes"] = ESP.getSketchSize();
+  device["freeSketchSpaceBytes"] = ESP.getFreeSketchSpace();
+  device["apStations"] = WiFi.softAPgetStationNum();
+
+  JsonObject sensors = document["sensors"].to<JsonObject>();
+  sensors["leftPirActive"] = leftPir_.isActive();
+  sensors["rightPirActive"] = rightPir_.isActive();
+  sensors["bh1750Available"] = lightSensorAvailable_;
+  if (lightSensorAvailable_) {
+    char address[7] = {};
+    snprintf(address, sizeof(address), "0x%02X", lightSensor_.address());
+    sensors["bh1750Address"] = address;
+  } else {
+    sensors["bh1750Address"] = nullptr;
+  }
+
   JsonObject calibration = document["calibration"].to<JsonObject>();
   calibration["active"] = setup_.isCalibrationActive();
   calibration["cursor"] = setup_.cursor();
@@ -274,6 +358,41 @@ void WebConfigServer::handleGetConfig() {
   if (!requireConfigMode()) {
     return;
   }
+  sendConfig();
+}
+
+void WebConfigServer::handleExportConfig() {
+  if (!requireConfigMode()) {
+    return;
+  }
+
+  JsonDocument document;
+  writeConfig(document, configuration_.get());
+  String body;
+  serializeJsonPretty(document, body);
+  server_.sendHeader("Cache-Control", "no-store");
+  server_.sendHeader("Content-Disposition",
+                     "attachment; filename=ledbox-config.json");
+  server_.send(200, "application/json", body);
+  noteActivity(millis());
+}
+
+void WebConfigServer::handleImportConfig() {
+  if (!requireConfigMode()) {
+    return;
+  }
+  if (setup_.isCalibrationActive()) {
+    sendError(409, "finish or cancel calibration before importing config");
+    return;
+  }
+
+  JsonDocument document;
+  if (!parseRequest(document) || !updateWorkingConfig(document)) {
+    return;
+  }
+  stopVisualActions(millis(), false);
+  configurationChanged_ = true;
+  noteActivity(millis());
   sendConfig();
 }
 
@@ -504,6 +623,107 @@ void WebConfigServer::handleCalibrationAction(const char* action) {
   sendOk("calibration action completed");
 }
 
+void WebConfigServer::handleFirmwareUpload() {
+  HTTPUpload& upload = server_.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    firmwareUploadStarted_ = false;
+    firmwareUploadFailed_ = false;
+    firmwareUploadBytes_ = 0;
+    firmwareUploadError_ = "";
+
+    if (!running_ || !operatingMode_.isConfigMode()) {
+      failFirmwareUpload("CONFIG MODE is not active");
+      return;
+    }
+    if (upload.filename.isEmpty()) {
+      failFirmwareUpload("firmware filename is empty");
+      return;
+    }
+
+    stopVisualActions(millis(), true);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+      failFirmwareUpload(String("cannot start OTA: ") +
+                         Update.errorString());
+      return;
+    }
+
+    firmwareUploadStarted_ = true;
+    noteActivity(millis());
+    Serial.print("Web Config: OTA upload started: ");
+    Serial.println(upload.filename);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!firmwareUploadStarted_ || firmwareUploadFailed_) {
+      return;
+    }
+    const size_t written = Update.write(upload.buf, upload.currentSize);
+    if (written != upload.currentSize) {
+      failFirmwareUpload(String("OTA write failed: ") +
+                         Update.errorString());
+      return;
+    }
+    firmwareUploadBytes_ += written;
+    noteActivity(millis());
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END) {
+    if (!firmwareUploadStarted_ || firmwareUploadFailed_) {
+      return;
+    }
+    if (firmwareUploadBytes_ == 0 || !Update.end(true)) {
+      failFirmwareUpload(String("OTA validation failed: ") +
+                         Update.errorString());
+      return;
+    }
+    noteActivity(millis());
+    Serial.print("Web Config: OTA image accepted, bytes: ");
+    Serial.println(firmwareUploadBytes_);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED) {
+    failFirmwareUpload("OTA upload aborted by client");
+  }
+}
+
+void WebConfigServer::handleFirmwareUploadComplete() {
+  if (!requireConfigMode()) {
+    return;
+  }
+
+  if (!firmwareUploadStarted_ || firmwareUploadFailed_) {
+    const String message = firmwareUploadError_.isEmpty()
+                               ? "no valid firmware image was uploaded"
+                               : firmwareUploadError_;
+    firmwareUploadStarted_ = false;
+    firmwareUploadFailed_ = false;
+    firmwareUploadBytes_ = 0;
+    firmwareUploadError_ = "";
+    sendError(422, message);
+    return;
+  }
+
+  noteActivity(millis());
+  sendOk("firmware accepted; restarting into updated NORMAL mode");
+  restartScheduled_ = true;
+  restartAtMs_ = millis() + settings_.restartDelayMs;
+  Serial.println("Web Config: OTA successful; restart scheduled");
+}
+
+void WebConfigServer::failFirmwareUpload(const String& message) {
+  if (Update.isRunning()) {
+    Update.abort();
+  }
+  firmwareUploadFailed_ = true;
+  firmwareUploadError_ = message;
+  Serial.print("Web Config: ");
+  Serial.println(message);
+}
+
 void WebConfigServer::handleNotFound() {
   sendError(404, "not found");
 }
@@ -542,8 +762,11 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
       !root["maxBrightness"].is<uint32_t>() ||
       !root["stripFadeInMs"].is<uint32_t>() ||
       !root["nextStripStartProgress"].is<float>() ||
+      !root["stripStartMode"].is<const char*>() ||
       !root["holdMs"].is<uint32_t>() ||
-      !root["fadeOutMs"].is<uint32_t>() || !root["gamma"].is<float>() ||
+      !root["fadeOutMs"].is<uint32_t>() ||
+      !root["fadeOutStyle"].is<const char*>() ||
+      !root["gamma"].is<float>() ||
       !root["enableWaterfall"].is<bool>() ||
       !root["waterfallDirection"].is<const char*>() ||
       !root["waterfallSpeedPps"].is<uint32_t>() ||
@@ -560,6 +783,8 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
       root["waterfallSpeedPps"].as<uint32_t>();
   const String waterfallDirection =
       root["waterfallDirection"].as<String>();
+  const String stripStartMode = root["stripStartMode"].as<String>();
+  const String fadeOutStyle = root["fadeOutStyle"].as<String>();
   if (stripCount == 0 || stripCount > MAX_STRIPS ||
       strips.size() != stripCount) {
     sendError(422, "strip count must match 1..MAX_STRIPS entries");
@@ -571,6 +796,15 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
   }
   if (maxBrightness == 0 || maxBrightness > UINT8_MAX) {
     sendError(422, "brightness must be within 1..255");
+    return false;
+  }
+  if (stripStartMode != "cascade" &&
+      stripStartMode != "simultaneous") {
+    sendError(422, "unsupported strip start mode");
+    return false;
+  }
+  if (fadeOutStyle != "global" && fadeOutStyle != "cascade") {
+    sendError(422, "unsupported fade-out style");
     return false;
   }
   if (waterfallDirection != "top-to-bottom" &&
@@ -591,8 +825,15 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
   candidate.stripFadeInMs = root["stripFadeInMs"].as<uint32_t>();
   candidate.nextStripStartProgress =
       root["nextStripStartProgress"].as<float>();
+  candidate.stripStartMode =
+      stripStartMode == "simultaneous"
+          ? StripStartMode::SIMULTANEOUS
+          : StripStartMode::CASCADE;
   candidate.holdMs = root["holdMs"].as<uint32_t>();
   candidate.fadeOutMs = root["fadeOutMs"].as<uint32_t>();
+  candidate.fadeOutStyle = fadeOutStyle == "cascade"
+                               ? FadeOutStyle::CASCADE
+                               : FadeOutStyle::GLOBAL;
   candidate.gamma = root["gamma"].as<float>();
   candidate.enableWaterfall = root["enableWaterfall"].as<bool>();
   candidate.waterfallDirection =

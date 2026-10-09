@@ -38,6 +38,23 @@ struct LegacyLightingConfigV2 {
   StripConfig strips[MAX_STRIPS];
 };
 
+struct LegacyLightingConfigV3 {
+  uint16_t configVersion;
+  uint8_t stripCount;
+  uint8_t maxBrightness;
+  uint32_t stripFadeInMs;
+  float nextStripStartProgress;
+  uint32_t holdMs;
+  uint32_t fadeOutMs;
+  float gamma;
+  bool enableWaterfall;
+  WaterfallDirection waterfallDirection;
+  uint16_t waterfallSpeedPps;
+  bool enableLuxGate;
+  float luxThreshold;
+  StripConfig strips[MAX_STRIPS];
+};
+
 LightingConfig migrateLegacyConfigV1(const LegacyLightingConfigV1& legacy) {
   LightingConfig migrated = {};
   migrated.configVersion = LIGHTING_CONFIG_VERSION;
@@ -45,8 +62,10 @@ LightingConfig migrateLegacyConfigV1(const LegacyLightingConfigV1& legacy) {
   migrated.maxBrightness = legacy.maxBrightness;
   migrated.stripFadeInMs = legacy.stripFadeInMs;
   migrated.nextStripStartProgress = legacy.nextStripStartProgress;
+  migrated.stripStartMode = StripStartMode::CASCADE;
   migrated.holdMs = legacy.holdMs;
   migrated.fadeOutMs = legacy.fadeOutMs;
+  migrated.fadeOutStyle = FadeOutStyle::GLOBAL;
   migrated.gamma = legacy.gamma;
   migrated.enableWaterfall = true;
   migrated.waterfallDirection = WaterfallDirection::TOP_TO_BOTTOM;
@@ -66,12 +85,37 @@ LightingConfig migrateLegacyConfigV2(const LegacyLightingConfigV2& legacy) {
   migrated.maxBrightness = legacy.maxBrightness;
   migrated.stripFadeInMs = legacy.stripFadeInMs;
   migrated.nextStripStartProgress = legacy.nextStripStartProgress;
+  migrated.stripStartMode = StripStartMode::CASCADE;
   migrated.holdMs = legacy.holdMs;
   migrated.fadeOutMs = legacy.fadeOutMs;
+  migrated.fadeOutStyle = FadeOutStyle::GLOBAL;
   migrated.gamma = legacy.gamma;
   migrated.enableWaterfall = legacy.enableWaterfall;
   migrated.waterfallDirection = legacy.waterfallDirection;
   migrated.waterfallSpeedPps = DEFAULT_WATERFALL_SPEED_PPS;
+  migrated.enableLuxGate = legacy.enableLuxGate;
+  migrated.luxThreshold = legacy.luxThreshold;
+  for (uint8_t index = 0; index < MAX_STRIPS; ++index) {
+    migrated.strips[index] = legacy.strips[index];
+  }
+  return migrated;
+}
+
+LightingConfig migrateLegacyConfigV3(const LegacyLightingConfigV3& legacy) {
+  LightingConfig migrated = {};
+  migrated.configVersion = LIGHTING_CONFIG_VERSION;
+  migrated.stripCount = legacy.stripCount;
+  migrated.maxBrightness = legacy.maxBrightness;
+  migrated.stripFadeInMs = legacy.stripFadeInMs;
+  migrated.nextStripStartProgress = legacy.nextStripStartProgress;
+  migrated.stripStartMode = StripStartMode::CASCADE;
+  migrated.holdMs = legacy.holdMs;
+  migrated.fadeOutMs = legacy.fadeOutMs;
+  migrated.fadeOutStyle = FadeOutStyle::GLOBAL;
+  migrated.gamma = legacy.gamma;
+  migrated.enableWaterfall = legacy.enableWaterfall;
+  migrated.waterfallDirection = legacy.waterfallDirection;
+  migrated.waterfallSpeedPps = legacy.waterfallSpeedPps;
   migrated.enableLuxGate = legacy.enableLuxGate;
   migrated.luxThreshold = legacy.luxThreshold;
   for (uint8_t index = 0; index < MAX_STRIPS; ++index) {
@@ -97,16 +141,21 @@ void ConfigurationManager::begin() {
   const size_t storedSize = preferences.getBytesLength(NVS_CONFIG_KEY);
   if (storedSize != sizeof(LightingConfig) &&
       storedSize != sizeof(LegacyLightingConfigV1) &&
-      storedSize != sizeof(LegacyLightingConfigV2)) {
+      storedSize != sizeof(LegacyLightingConfigV2) &&
+      storedSize != sizeof(LegacyLightingConfigV3)) {
     preferences.end();
     Serial.println("Config: no compatible saved config, using factory defaults");
     return;
   }
 
-  constexpr size_t MAX_LEGACY_CONFIG_SIZE =
+  constexpr size_t MAX_LEGACY_CONFIG_SIZE_V1_V2 =
       sizeof(LegacyLightingConfigV1) > sizeof(LegacyLightingConfigV2)
           ? sizeof(LegacyLightingConfigV1)
           : sizeof(LegacyLightingConfigV2);
+  constexpr size_t MAX_LEGACY_CONFIG_SIZE =
+      MAX_LEGACY_CONFIG_SIZE_V1_V2 > sizeof(LegacyLightingConfigV3)
+          ? MAX_LEGACY_CONFIG_SIZE_V1_V2
+          : sizeof(LegacyLightingConfigV3);
   constexpr size_t MAX_STORED_CONFIG_SIZE =
       sizeof(LightingConfig) > MAX_LEGACY_CONFIG_SIZE
           ? sizeof(LightingConfig)
@@ -136,6 +185,12 @@ void ConfigurationManager::begin() {
     memcpy(&legacy, storedBytes, sizeof(legacy));
     storedConfig = migrateLegacyConfigV2(legacy);
     migratedFromVersion = 2;
+  } else if (storedVersion == 3 &&
+             storedSize == sizeof(LegacyLightingConfigV3)) {
+    LegacyLightingConfigV3 legacy = {};
+    memcpy(&legacy, storedBytes, sizeof(legacy));
+    storedConfig = migrateLegacyConfigV3(legacy);
+    migratedFromVersion = 3;
   } else if (storedVersion == LIGHTING_CONFIG_VERSION &&
              storedSize == sizeof(LightingConfig)) {
     memcpy(&storedConfig, storedBytes, sizeof(storedConfig));
@@ -160,7 +215,8 @@ void ConfigurationManager::begin() {
   }
   Serial.print("Config: migrated v");
   Serial.print(migratedFromVersion);
-  Serial.println(" from NVS in RAM; save to persist v3");
+  Serial.print(" from NVS in RAM; save to persist v");
+  Serial.println(LIGHTING_CONFIG_VERSION);
 }
 
 const LightingConfig& ConfigurationManager::get() const { return config_; }

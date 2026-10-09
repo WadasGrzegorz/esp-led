@@ -21,7 +21,7 @@ starts a cascade from strip `1` to `stripCount`; RIGHT starts it from
 motion
   |
   v
-OFF -> CASCADE_IN -> ON -> GLOBAL_FADE_OUT -> OFF
+OFF -> FADE_IN -> ON -> FADE_OUT -> OFF
                        ^         |
         motion refreshes         | motion reverses smoothly
         the hold timer            +----> FADING_IN
@@ -34,16 +34,19 @@ than a long strip while the visible movement speed remains consistent. The
 per-strip `reversed` flag maps that logical direction to physical wiring, so
 strips wired in opposite directions still show the same visual flow. With
 waterfall disabled, each complete strip uses the configured whole-strip fade
-time. The next strip starts when the previous one reaches the configured
-progress (factory default 80%), giving a small overlap. Motion during fade-in
-leaves the active direction stable.
+time. Strip start mode can be directional `cascade` or `simultaneous`; the
+latter starts the waterfall on every strip at once. In cascade mode, the next
+strip starts when the previous one reaches the configured progress (factory
+default 80%), giving a small overlap. Motion during fade-in leaves the active
+direction stable.
 Each new PIR LOW-to-HIGH motion edge while the light is ON restarts the hold
 countdown. While either PIR remains HIGH, the countdown stays paused; `holdMs`
 starts only after both inputs report LOW, so the light cannot fade while a
-sensor still reports presence. A new motion edge during the global fade-out
-starts a new directional cascade from the current brightness, without jumping
-to zero or full brightness. Fade-out always affects all configured strips
-together.
+sensor still reports presence. Fade-out can affect all strips globally or move
+strip by strip in the last travel direction while keeping the configured total
+fade duration. A new motion edge during fade-out starts a new directional
+cascade from the current brightness, without jumping to zero or full
+brightness.
 
 The state machine and PIR edge detection use `millis()` and do not block the
 main loop. Brightness is gamma-corrected. Serial output reports state changes,
@@ -110,8 +113,8 @@ marker and asks the installer to confirm each physical boundary.
 - schema `configVersion`;
 - `stripCount` and up to `MAX_STRIPS` (currently 16) entries with `pixelCount`
   and `reversed`;
-- `maxBrightness`, `stripFadeInMs`, `nextStripStartProgress`, `holdMs`,
-  `fadeOutMs`, and `gamma`;
+- `maxBrightness`, `stripFadeInMs`, `nextStripStartProgress`,
+  `stripStartMode`, `holdMs`, `fadeOutMs`, `fadeOutStyle`, and `gamma`;
 - `enableWaterfall`, `waterfallDirection` (`top-to-bottom` or
   `bottom-to-top`), and `waterfallSpeedPps`;
 - `enableLuxGate` and `luxThreshold`.
@@ -119,21 +122,23 @@ marker and asks the installer to confirm each physical boundary.
 `startPixel` is never persisted. It is calculated as the cumulative sum of the
 preceding `pixelCount` values, avoiding two sources of truth. Every strip must
 contain at least one logical section and the total may not exceed the 180-entry
-LED buffer. Config v1 and v2 data is migrated in RAM to v3, using 40 pixels per
-second as the initial waterfall speed. Other invalid, missing, wrong-sized, or
-unsupported-version NVS data is rejected and the firmware starts with the
+LED buffer. Config v1-v3 data is migrated in RAM to v4. Older configurations
+retain cascade strip start, global fade-out, and use 40 pixels per second when
+the saved schema predates waterfall speed. Other invalid, missing, wrong-sized,
+or unsupported-version NVS data is rejected and the firmware starts with the
 factory `18/54/54/54` geometry.
 
 The factory configuration is:
 
 ```text
-Config v3: 4 strips, 180 logical pixels
+Config v4: 4 strips, 180 logical pixels
   #1: start=0,   count=18, end=17
   #2: start=18,  count=54, end=71
   #3: start=72,  count=54, end=125
   #4: start=126, count=54, end=179
 brightness=80, fadeInMs=1680, nextStart=80%
-holdMs=3000, fadeOutMs=2640, gamma=2.2
+stripStart=cascade, holdMs=3000
+fadeOutMs=2640, fadeOutStyle=global, gamma=2.2
 waterfall=top-to-bottom, speed=40 px/s
 luxGate=off, luxThreshold=15.0
 ```
@@ -199,8 +204,8 @@ credential, the AP fails closed and remains off.
 3. Open `http://ledbox.local` in a browser. If the client does not support
    mDNS, use the fallback address `http://192.168.4.1`.
 4. Configure strip count/lengths, orientation, animation, brightness, gamma,
-   waterfall mode/direction/speed, and lux gating. Use strip and directional
-   tests as needed.
+   strip start mode, waterfall direction/speed, fade-out style, and lux gating.
+   Use strip and directional tests as needed.
 5. Optionally run **Calibrate geometry**, move the visible marker, mark each
    physical boundary, and finish on the last logical pixel.
 6. Select **Save & restart**. The firmware validates the full configuration,
@@ -214,6 +219,19 @@ Strip tests stop automatically after 30 seconds or via **Stop test**. All web
 tests are capped at a safe brightness even when the configured runtime
 brightness is higher.
 
+The panel also provides live LEFT/RIGHT PIR states, BH1750 health/address,
+firmware/build/reset information, uptime, heap and OTA-space diagnostics.
+**Export config.json** downloads the current working configuration. Import
+validates and applies a backup in RAM; **Save & restart** is still required to
+persist it.
+
+Firmware updates accept the PlatformIO `firmware.bin` only in CONFIG MODE.
+The image is streamed into the inactive OTA partition, validated by the ESP32
+Update library, acknowledged to the browser, and then activated by restart.
+NVS configuration and the per-device AP password remain unchanged. The 4 MB
+flash uses two approximately 1.875 MB application slots; no filesystem is
+needed. An interrupted or rejected upload leaves the running firmware active.
+
 The UI is a single responsive HTML/CSS/JavaScript document stored in firmware;
 it uses no framework, CDN, internet service, station mode, or home network.
 The friendly `ledbox.local` name is advertised with mDNS only during CONFIG
@@ -222,9 +240,11 @@ The JSON API is intentionally small:
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/status` | Session time, live lux, geometry summary, and calibration/test state |
+| `GET /api/status` | Session time, sensors, firmware/system diagnostics, geometry, and test state |
 | `GET /api/config` | Read the current working configuration |
 | `PUT /api/config` | Validate and replace the working configuration in RAM |
+| `GET /api/config/export` | Download the working configuration as `ledbox-config.json` |
+| `POST /api/config/import` | Validate and apply a JSON backup in RAM |
 | `POST /api/save` | Validate, persist to NVS, acknowledge, and schedule NORMAL restart |
 | `POST /api/reset` | Load factory defaults into RAM without writing NVS |
 | `POST /api/strip/test` | Start or stop a safe single-strip test |
@@ -232,10 +252,13 @@ The JSON API is intentionally small:
 | `POST /api/test/stop` | Stop the active visual test |
 | `POST /api/calibration/{start,move,mark,undo,finish,cancel}` | Drive the shared calibration controller |
 | `POST /api/session/activity` | Refresh the idle timer for real UI interaction |
+| `POST /api/firmware` | Stream and validate a multipart `.bin` OTA image, then restart |
 
 All limits are validated again in firmware; browser validation is only for
-convenience. JSON bodies over 4 KiB are rejected. The server is available only
-on the physically activated SoftAP and stops at CONFIG MODE exit.
+convenience. Configuration JSON bodies over 4 KiB are rejected. Firmware uses
+a separate streaming multipart handler and is never buffered as one large RAM
+request. The server is available only on the physically activated SoftAP and
+stops at CONFIG MODE exit.
 
 ## Serial service fallback
 
@@ -423,6 +446,26 @@ ESP32-C6-DevKitM-1, GPIO8 also drives the onboard RGB LED and both pins are
 strapping pins. GPIO9 is read only after startup for physical CONFIG MODE
 entry; holding it during reset selects the ROM downloader instead.
 
+### Required service access after assembly
+
+Do not permanently bury every recovery interface. Provide one of these:
+
+- an opening or short extension that keeps the board's USB connector usable;
+- or a service header with `GND`, UART `TX` (GPIO16), UART `RX` (GPIO17),
+  `GPIO9/BOOT`, and `RST/EN`. Any external UART adapter must use 3.3 V logic.
+
+For normal CONFIG MODE, an external momentary button may connect GPIO9 to GND.
+Press it only after LedBox has booted and hold it for about three seconds. GPIO9
+is a strapping pin: holding that button during power-up/reset intentionally
+selects the ROM downloader instead of the application. A separate momentary
+RESET button may connect `RST/EN` to GND.
+
+OTA handles ordinary future updates, but USB/UART plus BOOT/RESET remains the
+recovery path for a firmware image that cannot boot or start CONFIG MODE. Do
+not connect an external 5 V/3.3 V supply through the service header while the
+board is powered from USB unless the power arrangement explicitly prevents
+backfeeding.
+
 ### Power distribution
 
 ```text
@@ -460,6 +503,7 @@ come directly from the PSU.
 | `POWER IN` (2) | `+24V`, `GND` | Separate PSU branch feeding ELEKING |
 | `SENSORS` (6) | `3V3`, `GND`, `LPIR`, `RPIR`, `SDA`, `SCL` | Power and signals for both PIRs and BH1750 |
 | `LED SIGNAL` (2) | `DATA`, `GND` | Buffered WS2811 data plus logic ground reference; no LED load current |
+| `SERVICE` (5) | `GND`, `TX`, `RX`, `BOOT`, `RST` | 3.3 V UART recovery and external CONFIG/RESET access |
 
 ### LED data and level shifter
 
@@ -547,8 +591,16 @@ then run:
 make compile
 ```
 
-This builds without touching a connected device. `make upload`, `make monitor`,
-and `make run` remain available for intentional device use.
+This builds without touching a connected device. `make ota-image` also prints
+the exact `.pio/build/esp32-c6/firmware.bin` path used by the Web Config upload.
+`make upload`, `make monitor`, and `make run` remain available for intentional
+device use.
+
+The first flash after enabling OTA must be performed once over USB/UART because
+it installs the larger dual-slot partition table. After that, compile with
+`make ota-image`, enter physical CONFIG MODE, and upload `firmware.bin` from
+the **Backup & firmware** panel. Do not upload `firmware.factory.bin` through
+the web form.
 
 ## Arduino CLI
 

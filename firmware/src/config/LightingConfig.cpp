@@ -51,11 +51,21 @@ ConfigValidationResult validateLightingConfig(const LightingConfig& config,
       config.nextStripStartProgress > 1.0F) {
     return invalid(ConfigValidationError::OVERLAP, 0, totalPixelCount);
   }
+  if (config.stripStartMode != StripStartMode::CASCADE &&
+      config.stripStartMode != StripStartMode::SIMULTANEOUS) {
+    return invalid(ConfigValidationError::STRIP_START_MODE, 0,
+                   totalPixelCount);
+  }
   if (config.holdMs == 0 || config.holdMs > MAX_HOLD_MS) {
     return invalid(ConfigValidationError::HOLD, 0, totalPixelCount);
   }
   if (config.fadeOutMs == 0 || config.fadeOutMs > MAX_FADE_MS) {
     return invalid(ConfigValidationError::FADE_OUT, 0, totalPixelCount);
+  }
+  if (config.fadeOutStyle != FadeOutStyle::GLOBAL &&
+      config.fadeOutStyle != FadeOutStyle::CASCADE) {
+    return invalid(ConfigValidationError::FADE_OUT_STYLE, 0,
+                   totalPixelCount);
   }
   if (!isfinite(config.gamma) || config.gamma < MIN_GAMMA ||
       config.gamma > MAX_GAMMA) {
@@ -98,10 +108,14 @@ const char* configValidationErrorName(const ConfigValidationError error) {
       return "fade-in duration is outside the supported range";
     case ConfigValidationError::OVERLAP:
       return "next-strip progress must be greater than 0 and at most 1";
+    case ConfigValidationError::STRIP_START_MODE:
+      return "unsupported strip start mode";
     case ConfigValidationError::HOLD:
       return "hold duration must be greater than zero and within the supported range";
     case ConfigValidationError::FADE_OUT:
       return "fade-out duration is outside the supported range";
+    case ConfigValidationError::FADE_OUT_STYLE:
+      return "unsupported fade-out style";
     case ConfigValidationError::GAMMA:
       return "gamma must be between 0.1 and 5.0";
     case ConfigValidationError::WATERFALL_DIRECTION:
@@ -118,6 +132,14 @@ const char* configValidationErrorName(const ConfigValidationError error) {
 const char* waterfallDirectionName(const WaterfallDirection direction) {
   return direction == WaterfallDirection::TOP_TO_BOTTOM ? "top-to-bottom"
                                                          : "bottom-to-top";
+}
+
+const char* fadeOutStyleName(const FadeOutStyle style) {
+  return style == FadeOutStyle::CASCADE ? "cascade" : "global";
+}
+
+const char* stripStartModeName(const StripStartMode mode) {
+  return mode == StripStartMode::SIMULTANEOUS ? "simultaneous" : "cascade";
 }
 
 uint16_t configuredPixelCount(const LightingConfig& config) {

@@ -118,14 +118,20 @@ void AnimationEngine::startCascade(const Direction direction,
     stripFadeInDurationsMs_[stripIndex] = durationMs;
     stripStartLogged_[stripIndex] = false;
     cascadeDurationMs_ = max(cascadeDurationMs_, nextStripStartMs + durationMs);
-    nextStripStartMs += static_cast<uint32_t>(
-        durationMs * config_.nextStripStartProgress + 0.5F);
+    if (config_.stripStartMode == StripStartMode::CASCADE) {
+      nextStripStartMs += static_cast<uint32_t>(
+          durationMs * config_.nextStripStartProgress + 0.5F);
+    }
   }
 
   Serial.print("Motion ");
   Serial.print(directionName(direction_));
-  Serial.print(" -> cascade ");
-  printCascadeName();
+  if (config_.stripStartMode == StripStartMode::SIMULTANEOUS) {
+    Serial.print(" -> all strips simultaneously");
+  } else {
+    Serial.print(" -> cascade ");
+    printCascadeName();
+  }
   Serial.println();
   logNewlyStartedStrips(0);
 }
@@ -138,7 +144,13 @@ void AnimationEngine::startFadeOut(const uint32_t nowMs) {
 
   state_ = State::FADING_OUT;
   stateStartedAtMs_ = nowMs;
-  Serial.println("Global fade-out started");
+  if (config_.fadeOutStyle == FadeOutStyle::CASCADE) {
+    Serial.print("Cascade fade-out started ");
+    printCascadeName();
+    Serial.println();
+  } else {
+    Serial.println("Global fade-out started");
+  }
 }
 
 void AnimationEngine::enterOn(const uint32_t nowMs) {
@@ -254,10 +266,33 @@ void AnimationEngine::renderFadeOut(const uint32_t elapsedMs) {
 }
 
 void AnimationEngine::updateFadeOutLevels(const uint32_t elapsedMs) {
-  const uint8_t fadedAmount = fadeLevel(elapsedMs, config_.fadeOutMs);
+  if (config_.fadeOutStyle == FadeOutStyle::GLOBAL) {
+    const uint8_t fadedAmount = fadeLevel(elapsedMs, config_.fadeOutMs);
+    for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
+         ++stripIndex) {
+      const uint16_t remaining =
+          fadeOutStartLevels_[stripIndex] * (FULL_LEVEL - fadedAmount);
+      stripLevels_[stripIndex] =
+          (remaining + FULL_LEVEL / 2) / FULL_LEVEL;
+    }
+    return;
+  }
 
-  for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
-       ++stripIndex) {
+  const float durationUnits =
+      1.0F + (config_.stripCount - 1) * config_.nextStripStartProgress;
+  const uint32_t stripDurationMs =
+      max(1UL, static_cast<uint32_t>(config_.fadeOutMs / durationUnits));
+  const uint32_t stripStartStepMs = max(
+      1UL, static_cast<uint32_t>(
+               stripDurationMs * config_.nextStripStartProgress + 0.5F));
+  for (uint8_t orderPosition = 0; orderPosition < config_.stripCount;
+       ++orderPosition) {
+    const uint8_t stripIndex = stripIndexAt(orderPosition);
+    const uint32_t startsAtMs = stripStartStepMs * orderPosition;
+    const uint8_t fadedAmount =
+        elapsedMs <= startsAtMs
+            ? 0
+            : fadeLevel(elapsedMs - startsAtMs, stripDurationMs);
     const uint16_t remaining =
         fadeOutStartLevels_[stripIndex] * (FULL_LEVEL - fadedAmount);
     stripLevels_[stripIndex] =
@@ -289,10 +324,13 @@ void AnimationEngine::logNewlyStartedStrips(const uint32_t elapsedMs) {
     Serial.print("Strip ");
     Serial.print(stripIndex + 1);
     Serial.print(" fade-in started");
-    if (orderPosition > 0) {
+    if (orderPosition > 0 &&
+        config_.stripStartMode == StripStartMode::CASCADE) {
       Serial.print(" at ");
       Serial.print(config_.nextStripStartProgress * 100.0F, 0);
       Serial.print("% overlap");
+    } else if (orderPosition > 0) {
+      Serial.print(" simultaneously");
     }
     Serial.println();
   }

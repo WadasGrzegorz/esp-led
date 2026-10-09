@@ -179,10 +179,14 @@ void SerialCli::printConfig() const {
   Serial.print(config.stripFadeInMs);
   Serial.print(", nextStart=");
   Serial.print(config.nextStripStartProgress * 100.0F, 0);
-  Serial.print("%, holdMs=");
+  Serial.print("%, stripStart=");
+  Serial.print(stripStartModeName(config.stripStartMode));
+  Serial.print(", holdMs=");
   Serial.print(config.holdMs);
   Serial.print(", fadeOutMs=");
-  Serial.println(config.fadeOutMs);
+  Serial.print(config.fadeOutMs);
+  Serial.print(", fadeOutStyle=");
+  Serial.println(fadeOutStyleName(config.fadeOutStyle));
   Serial.print("  gamma=");
   Serial.print(config.gamma, 2);
   Serial.print(", waterfall=");
