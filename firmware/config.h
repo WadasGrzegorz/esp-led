@@ -16,8 +16,11 @@ constexpr uint8_t BH1750_SCL_PIN = 3;
 constexpr uint8_t CONFIG_BUTTON_PIN = 9;
 constexpr uint8_t BH1750_LOW_ADDRESS = 0x23;
 constexpr uint8_t BH1750_HIGH_ADDRESS = 0x5C;
-constexpr uint16_t WS2811_CONTROLLER_COUNT = 60;
-constexpr uint16_t LOGICAL_PIXEL_COUNT = WS2811_CONTROLLER_COUNT * 3;
+// Each controller's GRB bytes address three monochrome sections.
+constexpr uint8_t WS2811_SECTIONS_PER_CONTROLLER = 3;
+constexpr uint16_t WS2811_CONTROLLER_COUNT =
+    (MAX_LOGICAL_PIXELS + WS2811_SECTIONS_PER_CONTROLLER - 1) /
+    WS2811_SECTIONS_PER_CONTROLLER;
 constexpr uint32_t SERIAL_BAUD_RATE = 115200;
 constexpr uint32_t PIR_STABILIZATION_MS = 10000;
 constexpr uint32_t PIR_DEBOUNCE_MS = 80;
@@ -56,7 +59,8 @@ constexpr LightingConfig DEFAULT_LIGHTING_CONFIG = {
         {54, false},
         {54, false},
     },
+    0,      // startDelayMs; 0 starts immediately, 2000 waits 2 seconds
 };
 
-static_assert(18 + 54 + 54 + 54 == hardware::LOGICAL_PIXEL_COUNT,
-              "Factory geometry must cover the verified 180-section chain");
+static_assert(18 + 54 + 54 + 54 <= MAX_LOGICAL_PIXELS,
+              "Factory geometry must fit within the firmware capacity");

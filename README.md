@@ -3,8 +3,11 @@
 Non-blocking motion-triggered corridor lighting for an ESP32-C6, two AM312 PIR
 sensors, a diagnostic BH1750 lux sensor, and a 24 V monochrome COB strip driven
 by WS2811 controllers. The firmware keeps the verified GPIO4, SN74AHCT125 level
-shifter, WS2811/GRB protocol, 60 controller count, and a buffer for 180
-independently addressable monochrome sections.
+shifter and WS2811/GRB protocol. `MAX_LOGICAL_PIXELS` in
+`firmware/src/config/LightingConfig.h` defines a capacity of 720 independently
+addressable monochrome sections (about 20 m at 36 sections per metre). The
+240-controller FastLED buffer is derived from this limit; each controller's
+three GRB bytes drive three consecutive monochrome sections.
 
 The number and lengths of the physical vertical strips ("sople") are runtime
 configuration. The safe factory fallback remains the verified four-strip chain
@@ -21,11 +24,25 @@ starts a cascade from strip `1` to `stripCount`; RIGHT starts it from
 motion
   |
   v
-OFF -> FADE_IN -> ON -> FADE_OUT -> OFF
-                       ^         |
-        motion refreshes         | motion reverses smoothly
-        the hold timer            +----> FADING_IN
+OFF -> START_DELAY -> FADE_IN -> ON -> FADE_OUT -> OFF
+                         ^               |
+                         +---- motion ---+
 ```
+
+The configurable `startDelayMs` waits before starting the animation from OFF,
+so someone opening a door can enter in time to see the whole animation. In the
+web panel, set **Start delay** in seconds (for example, `2` means 2000 ms).
+The **Whole-strip fade-in**, **Hold after both PIRs LOW**, and **Total fade-out**
+fields also use seconds and accept fractions (for example, `2.5` seconds).
+All four fields preserve millisecond precision; the API, JSON backups and NVS
+continue to store durations in milliseconds.
+The supported range is 0–60 seconds; the default is 0 (immediate). The first
+accepted motion edge fixes the deadline and direction. Further edges during
+the wait do not restart it or change direction, and the animation still runs
+if the PIR returns LOW before the wait ends. The wait does not consume any
+fade-in or hold time. Motion during fade-out still reverses immediately.
+Animation tests include the delay; stopping a test or entering CONFIG MODE
+cancels any pending start. The delay uses `millis()` without blocking the loop.
 
 With waterfall enabled, every strip also fills pixel by pixel while fading
 smoothly: either from top to bottom or from bottom to top. Waterfall speed is
@@ -114,30 +131,42 @@ marker and asks the installer to confirm each physical boundary.
 - `stripCount` and up to `MAX_STRIPS` (currently 16) entries with `pixelCount`
   and `reversed`;
 - `maxBrightness`, `stripFadeInMs`, `nextStripStartProgress`,
-  `stripStartMode`, `holdMs`, `fadeOutMs`, `fadeOutStyle`, and `gamma`;
+  `stripStartMode`, `startDelayMs`, `holdMs`, `fadeOutMs`, `fadeOutStyle`,
+  and `gamma`;
 - `enableWaterfall`, `waterfallDirection` (`top-to-bottom` or
   `bottom-to-top`), and `waterfallSpeedPps`;
 - `enableLuxGate` and `luxThreshold`.
 
 `startPixel` is never persisted. It is calculated as the cumulative sum of the
 preceding `pixelCount` values, avoiding two sources of truth. Every strip must
-contain at least one logical section and the total may not exceed the 180-entry
-LED buffer. Config v1-v3 data is migrated in RAM to v4. Older configurations
-retain cascade strip start, global fade-out, and use 40 pixels per second when
-the saved schema predates waterfall speed. Other invalid, missing, wrong-sized,
+contain at least one logical section and the total may not exceed
+`MAX_LOGICAL_PIXELS`. `configuredPixelCount` is the sum of active strip lengths;
+`stripCount` remains dynamic and `pixelCount` describes one strip. Configurations
+do not need to fill the buffer. The Web UI reads `maxPixels` and `maxStrips` from
+`/api/status`, displays used / maximum sections and remaining capacity, and
+blocks invalid geometry before applying or saving. Firmware validation also
+enforces the limits for direct API requests and imported configurations.
+
+Increasing capacity does not change the NVS schema, version, namespace, key, or
+factory geometry. Existing saved geometry is loaded unchanged; boot only opens
+NVS for reading, with no automatic save or reset.
+Config v1-v4 data is migrated in RAM to v5 with zero start delay.
+Configurations from v1-v3 retain cascade strip start and global fade-out;
+v4 retains its saved strip-start and fade-out modes. Schemas predating
+waterfall speed use 40 pixels per second. Other invalid, missing, wrong-sized,
 or unsupported-version NVS data is rejected and the firmware starts with the
 factory `18/54/54/54` geometry.
 
 The factory configuration is:
 
 ```text
-Config v4: 4 strips, 180 logical pixels
+Config v5: 4 strips, 180 logical pixels
   #1: start=0,   count=18, end=17
   #2: start=18,  count=54, end=71
   #3: start=72,  count=54, end=125
   #4: start=126, count=54, end=179
 brightness=80, fadeInMs=1680, nextStart=80%
-stripStart=cascade, holdMs=3000
+stripStart=cascade, startDelayMs=0, holdMs=3000
 fadeOutMs=2640, fadeOutStyle=global, gamma=2.2
 waterfall=top-to-bottom, speed=40 px/s
 luxGate=off, luxThreshold=15.0
@@ -146,6 +175,46 @@ luxGate=off, luxThreshold=15.0
 The lux gate remains off by default during animation tuning. BH1750 detection,
 retries, readings, and logging remain active. Enabling the flag later restores
 the threshold check without changing the sensor or animation code.
+
+## Capacity, memory and refresh budget
+
+The application buffer grows from 60 to 240 `CRGB` entries: 180 to 720 bytes,
+an increase of 540 bytes. The FastLED RMT5 driver also allocates a byte buffer
+of the same size, adding another 540 bytes at runtime. The two pixel buffers
+therefore grow by about 1080 bytes combined. Per-strip animation state and the
+NVS configuration size stay unchanged. A PlatformIO ESP32-C6 release build
+reports 49,880 bytes of static RAM (15.2% of its 327,680-byte budget) and
+1,209,086 bytes of application flash (61.5% of the OTA slot). Static RAM usage
+does not include the driver's heap allocation or Wi-Fi runtime allocations.
+
+FastLED 3.10.3 defines the WS2811 bit period as 320 + 320 + 640 ns and its RMT5
+driver uses a 280 us reset interval. At full capacity, the nominal wire budget
+is `720 * 8 * 1.28 us + 280 us`, approximately 7.7 ms per frame, or 130 frames/s
+before rendering and driver overhead. The 10 MHz RMT encoder quantizes these
+timings, so the actual wire period can be closer to 7.2 ms. The full buffer is
+transmitted even for shorter configured geometry, with unused sections off.
+Rendering still visits only configured sections: waterfall rendering and its
+gamma calculations are linear in their count (up to four times the prototype
+work at maximum capacity). Whole-strip fades calculate gamma once per strip.
+Animation durations and waterfall speed remain based on elapsed milliseconds
+and configured sections per second. No frame-rate cap or sensor timing changed.
+
+These are code-derived budgets, not ESP32-C6 measurements; actual frame rate,
+free heap and visual smoothness under Wi-Fi load still need hardware validation.
+Sources: FastLED's pinned [WS2811 timings](https://github.com/FastLED/FastLED/blob/3.10.3/src/chipsets.h),
+[RMT5 reset interval](https://github.com/FastLED/FastLED/blob/3.10.3/src/platforms/esp/32/rmt_5/idf5_rmt.cpp),
+[RMT configuration](https://github.com/FastLED/FastLED/blob/3.10.3/src/platforms/esp/32/rmt_5/strip_rmt.cpp),
+and [pixel-buffer allocation](https://github.com/FastLED/FastLED/blob/3.10.3/src/third_party/espressif/led_strip/src/led_strip_rmt_dev.c).
+
+`make test` covers 4 strips / 180 sections, 5 / 181, 5 / 270, 8 / 360,
+8 / 361, and 8 / maximum capacity, plus a single full-length strip and
+`MAX_STRIPS` strips. The new maximum is 720, so 361 is valid; 721, zero-length
+strips and more than `MAX_STRIPS` strips are rejected. Native tests use
+AddressSanitizer and UndefinedBehaviorSanitizer for capacity, every logical
+address including the last, out-of-range writes, calibration, NVS preservation,
+both travel directions, reversed strips, waterfall, simultaneous/cascade starts
+and global/cascade fades. Node tests cover firmware-supplied UI limits, remaining
+capacity, invalid geometry, and unavailable capacity metadata.
 
 ## Security / Config Mode
 
@@ -204,7 +273,7 @@ credential, the AP fails closed and remains off.
 3. Open `http://ledbox.local` in a browser. If the client does not support
    mDNS, use the fallback address `http://192.168.4.1`.
 4. Configure strip count/lengths, orientation, animation, brightness, gamma,
-   strip start mode, waterfall direction/speed, fade-out style, and lux gating.
+   strip start mode, start delay, waterfall direction/speed, fade-out style, and lux gating.
    Use strip and directional tests as needed.
 5. Optionally run **Calibrate geometry**, move the visible marker, mark each
    physical boundary, and finish on the last logical pixel.
@@ -223,7 +292,8 @@ The panel also provides live LEFT/RIGHT PIR states, BH1750 health/address,
 firmware/build/reset information, uptime, heap and OTA-space diagnostics.
 **Export config.json** downloads the current working configuration. Import
 validates and applies a backup in RAM; **Save & restart** is still required to
-persist it.
+persist it. JSON backups from v4 are accepted with zero start delay when the
+field is absent; current v5 backups include `startDelayMs` in milliseconds.
 
 Firmware updates accept the PlatformIO `firmware.bin` only in CONFIG MODE.
 The image is streamed into the inactive OTA partition, validated by the ESP32
@@ -584,21 +654,30 @@ electrolytic capacitor polarity before applying power.
 
 ## PlatformIO: compile, flash, and monitor
 
+Run `make test` for host-side animation, timing, configuration migration and
+web form tests (requires a C++17 compiler and Node.js). The tests use in-memory
+LED/NVS substitutes and do not require a connected device.
+
 Install [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html),
 then run:
 
 ```sh
-make compile
+make prepare
 ```
 
-This builds without touching a connected device. `make ota-image` also prints
+This builds the firmware and copies `firmware.bin` into the project root,
+next to `Makefile`, ready to select in the Web Config upload. The generated
+file is ignored by Git. Each successful run replaces it with the latest build.
+The command does not flash or restart a connected device.
+
+`make compile` builds without copying the image. `make ota-image` also prints
 the exact `.pio/build/esp32-c6/firmware.bin` path used by the Web Config upload.
 `make upload`, `make monitor`, and `make run` remain available for intentional
 device use.
 
 The first flash after enabling OTA must be performed once over USB/UART because
 it installs the larger dual-slot partition table. After that, compile with
-`make ota-image`, enter physical CONFIG MODE, and upload `firmware.bin` from
+`make prepare`, enter physical CONFIG MODE, and upload the root `firmware.bin` from
 the **Backup & firmware** panel. Do not upload `firmware.factory.bin` through
 the web form.
 

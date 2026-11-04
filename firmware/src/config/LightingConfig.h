@@ -2,8 +2,11 @@
 
 #include <Arduino.h>
 
-constexpr uint16_t LIGHTING_CONFIG_VERSION = 4;
+constexpr uint16_t LIGHTING_CONFIG_VERSION = 5;
+constexpr uint32_t MAX_START_DELAY_MS = 60000;
 constexpr uint8_t MAX_STRIPS = 16;
+// Firmware capacity, independent of the user's strip count and lengths.
+constexpr uint16_t MAX_LOGICAL_PIXELS = 720;
 constexpr uint16_t MIN_WATERFALL_SPEED_PPS = 5;
 constexpr uint16_t MAX_WATERFALL_SPEED_PPS = 120;
 
@@ -44,6 +47,7 @@ struct LightingConfig {
   bool enableLuxGate;
   float luxThreshold;
   StripConfig strips[MAX_STRIPS];
+  uint32_t startDelayMs;
 };
 
 enum class ConfigValidationError : uint8_t {
@@ -56,6 +60,7 @@ enum class ConfigValidationError : uint8_t {
   FADE_IN,
   OVERLAP,
   STRIP_START_MODE,
+  START_DELAY,
   HOLD,
   FADE_OUT,
   FADE_OUT_STYLE,
