@@ -36,12 +36,14 @@ void LedController::setRange(const uint16_t startPixel,
                              const uint16_t pixelCount,
                              const uint8_t linearLevel) {
   const uint8_t correctedLevel = gammaCorrect(linearLevel);
-  for (uint16_t offset = 0; offset < pixelCount; ++offset) {
-    const uint16_t logicalPixel = startPixel + offset;
-    if (logicalPixel >= logicalPixelCount_) {
-      return;
-    }
-    setCorrectedLogicalPixel(logicalPixel, correctedLevel);
+  if (startPixel >= logicalPixelCount_) {
+    return;
+  }
+  // Clip once to the remaining capacity so every loop offset stays in bounds.
+  const uint16_t boundedCount =
+      min(pixelCount, static_cast<uint16_t>(logicalPixelCount_ - startPixel));
+  for (uint16_t offset = 0; offset < boundedCount; ++offset) {
+    setCorrectedLogicalPixel(startPixel + offset, correctedLevel);
   }
 }
 
@@ -55,14 +57,15 @@ void LedController::setLogicalPixel(const uint16_t logicalPixel,
 
 void LedController::setCorrectedLogicalPixel(const uint16_t logicalPixel,
                                              const uint8_t correctedLevel) {
-  const uint16_t controller = logicalPixel / 3;
+  const uint16_t controller =
+      logicalPixel / hardware::WS2811_SECTIONS_PER_CONTROLLER;
   if (controller >= controllerCount_) {
     return;
   }
 
   // FastLED transmits CRGB fields in the configured GRB wire order. The
   // monochrome WS2811 strip exposes those three bytes as consecutive sections.
-  switch (logicalPixel % 3) {
+  switch (logicalPixel % hardware::WS2811_SECTIONS_PER_CONTROLLER) {
     case 0:
       leds_[controller].g = correctedLevel;
       return;

@@ -16,14 +16,14 @@ namespace {
 CRGB leds[hardware::WS2811_CONTROLLER_COUNT];
 
 ConfigurationManager configuration(DEFAULT_LIGHTING_CONFIG,
-                                   hardware::LOGICAL_PIXEL_COUNT);
+                                   MAX_LOGICAL_PIXELS);
 LedController ledController(
     leds,
     hardware::WS2811_CONTROLLER_COUNT,
-    hardware::LOGICAL_PIXEL_COUNT);
+    MAX_LOGICAL_PIXELS);
 AnimationEngine animation(ledController, configuration.get());
 SetupController setupController(ledController, configuration,
-                                hardware::LOGICAL_PIXEL_COUNT);
+                                MAX_LOGICAL_PIXELS);
 OperatingModeController operatingMode(hardware::CONFIG_BUTTON_PIN,
                                       hardware::CONFIG_BUTTON_HOLD_MS,
                                       hardware::CONFIG_MODE_TIMEOUT_MS);
@@ -55,7 +55,7 @@ const WebConfigDependencies webConfigDependencies = {
     ledController,         leftPir,         rightPir,      lightSensor,
     lightSensorAvailable,  hasLuxReading,   currentLux};
 const WebConfigSettings webConfigSettings = {
-    hardware::LOGICAL_PIXEL_COUNT,
+    MAX_LOGICAL_PIXELS,
     hardware::CONFIG_STRIP_TEST_TIMEOUT_MS,
     hardware::CONFIG_SAVE_RESTART_DELAY_MS,
 };
@@ -271,7 +271,7 @@ void setup() {
   Serial.print("LED controllers: ");
   Serial.print(hardware::WS2811_CONTROLLER_COUNT);
   Serial.print(", logical monochrome pixels: ");
-  Serial.println(hardware::LOGICAL_PIXEL_COUNT);
+  Serial.println(MAX_LOGICAL_PIXELS);
   Serial.print("Active geometry: ");
   Serial.print(lightingConfig.stripCount);
   Serial.print(" strips, ");

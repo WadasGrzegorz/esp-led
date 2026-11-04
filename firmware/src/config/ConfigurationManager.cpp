@@ -1,59 +1,15 @@
 #include "ConfigurationManager.h"
 
 #include <Preferences.h>
+#include <stddef.h>
 #include <string.h>
+
+#include "ConfigStorageTypes.h"
 
 namespace {
 constexpr char NVS_NAMESPACE[] = "lighting";
 constexpr char NVS_CONFIG_KEY[] = "config";
 constexpr uint16_t DEFAULT_WATERFALL_SPEED_PPS = 40;
-
-struct LegacyLightingConfigV1 {
-  uint16_t configVersion;
-  uint8_t stripCount;
-  uint8_t maxBrightness;
-  uint32_t stripFadeInMs;
-  float nextStripStartProgress;
-  uint32_t holdMs;
-  uint32_t fadeOutMs;
-  float gamma;
-  bool enableLuxGate;
-  float luxThreshold;
-  StripConfig strips[MAX_STRIPS];
-};
-
-struct LegacyLightingConfigV2 {
-  uint16_t configVersion;
-  uint8_t stripCount;
-  uint8_t maxBrightness;
-  uint32_t stripFadeInMs;
-  float nextStripStartProgress;
-  uint32_t holdMs;
-  uint32_t fadeOutMs;
-  float gamma;
-  bool enableWaterfall;
-  WaterfallDirection waterfallDirection;
-  bool enableLuxGate;
-  float luxThreshold;
-  StripConfig strips[MAX_STRIPS];
-};
-
-struct LegacyLightingConfigV3 {
-  uint16_t configVersion;
-  uint8_t stripCount;
-  uint8_t maxBrightness;
-  uint32_t stripFadeInMs;
-  float nextStripStartProgress;
-  uint32_t holdMs;
-  uint32_t fadeOutMs;
-  float gamma;
-  bool enableWaterfall;
-  WaterfallDirection waterfallDirection;
-  uint16_t waterfallSpeedPps;
-  bool enableLuxGate;
-  float luxThreshold;
-  StripConfig strips[MAX_STRIPS];
-};
 
 LightingConfig migrateLegacyConfigV1(const LegacyLightingConfigV1& legacy) {
   LightingConfig migrated = {};
@@ -142,7 +98,8 @@ void ConfigurationManager::begin() {
   if (storedSize != sizeof(LightingConfig) &&
       storedSize != sizeof(LegacyLightingConfigV1) &&
       storedSize != sizeof(LegacyLightingConfigV2) &&
-      storedSize != sizeof(LegacyLightingConfigV3)) {
+      storedSize != sizeof(LegacyLightingConfigV3) &&
+      storedSize != sizeof(LegacyLightingConfigV4)) {
     preferences.end();
     Serial.println("Config: no compatible saved config, using factory defaults");
     return;
@@ -156,10 +113,14 @@ void ConfigurationManager::begin() {
       MAX_LEGACY_CONFIG_SIZE_V1_V2 > sizeof(LegacyLightingConfigV3)
           ? MAX_LEGACY_CONFIG_SIZE_V1_V2
           : sizeof(LegacyLightingConfigV3);
+  constexpr size_t MAX_LEGACY_CONFIG_SIZE_V1_V4 =
+      MAX_LEGACY_CONFIG_SIZE > sizeof(LegacyLightingConfigV4)
+          ? MAX_LEGACY_CONFIG_SIZE
+          : sizeof(LegacyLightingConfigV4);
   constexpr size_t MAX_STORED_CONFIG_SIZE =
-      sizeof(LightingConfig) > MAX_LEGACY_CONFIG_SIZE
+      sizeof(LightingConfig) > MAX_LEGACY_CONFIG_SIZE_V1_V4
           ? sizeof(LightingConfig)
-          : MAX_LEGACY_CONFIG_SIZE;
+          : MAX_LEGACY_CONFIG_SIZE_V1_V4;
   uint8_t storedBytes[MAX_STORED_CONFIG_SIZE] = {};
   const size_t readSize = preferences.getBytes(
       NVS_CONFIG_KEY, storedBytes, storedSize);
@@ -191,6 +152,16 @@ void ConfigurationManager::begin() {
     memcpy(&legacy, storedBytes, sizeof(legacy));
     storedConfig = migrateLegacyConfigV3(legacy);
     migratedFromVersion = 3;
+  } else if (storedVersion == 4 &&
+             storedSize == sizeof(LegacyLightingConfigV4)) {
+    // v5 appends startDelayMs; the complete v4 prefix is unchanged.
+    static_assert(offsetof(LightingConfig, startDelayMs) ==
+                      sizeof(LegacyLightingConfigV4),
+                  "v4 migration requires an unchanged config prefix");
+    memcpy(&storedConfig, storedBytes, sizeof(LegacyLightingConfigV4));
+    storedConfig.configVersion = LIGHTING_CONFIG_VERSION;
+    storedConfig.startDelayMs = 0;
+    migratedFromVersion = 4;
   } else if (storedVersion == LIGHTING_CONFIG_VERSION &&
              storedSize == sizeof(LightingConfig)) {
     memcpy(&storedConfig, storedBytes, sizeof(storedConfig));

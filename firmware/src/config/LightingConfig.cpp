@@ -56,6 +56,9 @@ ConfigValidationResult validateLightingConfig(const LightingConfig& config,
     return invalid(ConfigValidationError::STRIP_START_MODE, 0,
                    totalPixelCount);
   }
+  if (config.startDelayMs > MAX_START_DELAY_MS) {
+    return invalid(ConfigValidationError::START_DELAY, 0, totalPixelCount);
+  }
   if (config.holdMs == 0 || config.holdMs > MAX_HOLD_MS) {
     return invalid(ConfigValidationError::HOLD, 0, totalPixelCount);
   }
@@ -110,6 +113,8 @@ const char* configValidationErrorName(const ConfigValidationError error) {
       return "next-strip progress must be greater than 0 and at most 1";
     case ConfigValidationError::STRIP_START_MODE:
       return "unsupported strip start mode";
+    case ConfigValidationError::START_DELAY:
+      return "start delay must be between 0 and 60000 ms";
     case ConfigValidationError::HOLD:
       return "hold duration must be greater than zero and within the supported range";
     case ConfigValidationError::FADE_OUT:

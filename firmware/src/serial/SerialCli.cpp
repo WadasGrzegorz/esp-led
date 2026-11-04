@@ -181,6 +181,8 @@ void SerialCli::printConfig() const {
   Serial.print(config.nextStripStartProgress * 100.0F, 0);
   Serial.print("%, stripStart=");
   Serial.print(stripStartModeName(config.stripStartMode));
+  Serial.print(", startDelayMs=");
+  Serial.print(config.startDelayMs);
   Serial.print(", holdMs=");
   Serial.print(config.holdMs);
   Serial.print(", fadeOutMs=");

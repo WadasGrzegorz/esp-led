@@ -22,6 +22,7 @@ class AnimationEngine {
  private:
   enum class State : uint8_t {
     OFF,
+    WAITING_TO_START,
     FADING_IN,
     ON,
     FADING_OUT,

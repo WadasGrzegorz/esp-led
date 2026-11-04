@@ -36,6 +36,7 @@ void writeConfig(JsonDocument& document, const LightingConfig& config) {
   document["stripFadeInMs"] = config.stripFadeInMs;
   document["nextStripStartProgress"] = config.nextStripStartProgress;
   document["stripStartMode"] = stripStartModeName(config.stripStartMode);
+  document["startDelayMs"] = config.startDelayMs;
   document["holdMs"] = config.holdMs;
   document["fadeOutMs"] = config.fadeOutMs;
   document["fadeOutStyle"] = fadeOutStyleName(config.fadeOutStyle);
@@ -757,12 +758,16 @@ bool WebConfigServer::parseRequest(JsonDocument& document) {
 bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
   const JsonObjectConst root = document.as<JsonObjectConst>();
   const JsonArrayConst strips = root["strips"].as<JsonArrayConst>();
+  const bool legacyV4 = root["configVersion"].is<uint32_t>() &&
+                        root["configVersion"].as<uint32_t>() == 4;
+  const bool missingLegacyDelay = legacyV4 && root["startDelayMs"].isNull();
   if (!root["configVersion"].is<uint32_t>() ||
       !root["stripCount"].is<uint32_t>() ||
       !root["maxBrightness"].is<uint32_t>() ||
       !root["stripFadeInMs"].is<uint32_t>() ||
       !root["nextStripStartProgress"].is<float>() ||
       !root["stripStartMode"].is<const char*>() ||
+      (!missingLegacyDelay && !root["startDelayMs"].is<uint32_t>()) ||
       !root["holdMs"].is<uint32_t>() ||
       !root["fadeOutMs"].is<uint32_t>() ||
       !root["fadeOutStyle"].is<const char*>() ||
@@ -790,7 +795,7 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     sendError(422, "strip count must match 1..MAX_STRIPS entries");
     return false;
   }
-  if (configVersion != LIGHTING_CONFIG_VERSION) {
+  if (configVersion != LIGHTING_CONFIG_VERSION && !legacyV4) {
     sendError(422, "unsupported config version");
     return false;
   }
@@ -819,7 +824,7 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
   }
 
   LightingConfig candidate = {};
-  candidate.configVersion = static_cast<uint16_t>(configVersion);
+  candidate.configVersion = LIGHTING_CONFIG_VERSION;
   candidate.stripCount = static_cast<uint8_t>(stripCount);
   candidate.maxBrightness = static_cast<uint8_t>(maxBrightness);
   candidate.stripFadeInMs = root["stripFadeInMs"].as<uint32_t>();
@@ -830,6 +835,9 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
           ? StripStartMode::SIMULTANEOUS
           : StripStartMode::CASCADE;
   candidate.holdMs = root["holdMs"].as<uint32_t>();
+  candidate.startDelayMs = missingLegacyDelay
+                               ? 0
+                               : root["startDelayMs"].as<uint32_t>();
   candidate.fadeOutMs = root["fadeOutMs"].as<uint32_t>();
   candidate.fadeOutStyle = fadeOutStyle == "cascade"
                                ? FadeOutStyle::CASCADE
@@ -854,7 +862,9 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     }
     const uint32_t pixelCount = strip["pixelCount"].as<uint32_t>();
     if (pixelCount == 0 || pixelCount > settings_.logicalPixelLimit) {
-      sendError(422, "strip pixelCount is outside the supported range");
+      sendError(422, String("strip #") + String(index + 1) +
+                         " pixelCount must be 1.." +
+                         String(settings_.logicalPixelLimit));
       return false;
     }
     candidate.strips[index] = {static_cast<uint16_t>(pixelCount),
@@ -867,6 +877,10 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     if (validation.error == ConfigValidationError::EMPTY_STRIP ||
         validation.error == ConfigValidationError::PIXEL_LIMIT) {
       message += " at strip #" + String(validation.stripIndex + 1);
+    }
+    if (validation.error == ConfigValidationError::PIXEL_LIMIT) {
+      message += " (capacity: " + String(settings_.logicalPixelLimit) +
+                 " logical pixels)";
     }
     sendError(422, message);
     return false;

@@ -41,6 +41,11 @@ void AnimationEngine::update(const uint32_t nowMs, const bool motionActive) {
   switch (state_) {
     case State::OFF:
       return;
+    case State::WAITING_TO_START:
+      if (elapsedMs >= config_.startDelayMs) {
+        startCascade(direction_, nowMs);
+      }
+      return;
     case State::FADING_IN:
       renderFadeIn(elapsedMs);
       if (elapsedMs >= cascadeDurationMs_) {
@@ -71,7 +76,21 @@ void AnimationEngine::trigger(const Direction direction,
                               const uint32_t nowMs) {
   switch (state_) {
     case State::OFF:
-      startCascade(direction, nowMs);
+      if (config_.startDelayMs == 0) {
+        startCascade(direction, nowMs);
+        return;
+      }
+      direction_ = direction;
+      state_ = State::WAITING_TO_START;
+      stateStartedAtMs_ = nowMs;
+      Serial.print("Motion ");
+      Serial.print(directionName(direction_));
+      Serial.print(" -> animation starts in ");
+      Serial.print(config_.startDelayMs);
+      Serial.println(" ms");
+      return;
+    case State::WAITING_TO_START:
+      // The first accepted edge owns the deadline and travel direction.
       return;
     case State::FADING_IN:
       Serial.print("Motion ");
