@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "src/config/ConfigurationManager.h"
+#include "src/diagnostics/Diagnostics.h"
 #include "src/led/AnimationEngine.h"
 #include "src/led/LedController.h"
 #include "src/mode/OperatingModeController.h"
@@ -133,6 +134,7 @@ void detectLightSensor(const uint32_t nowMs) {
 
 void logLux(const uint32_t nowMs) {
   const bool ledsActive = !animation.isOff() ||
+                          webConfig.isAnimationTestActive() ||
                           setupController.isServiceModeActive();
   if (ledsActive) {
     lastLedActivityAtMs = nowMs;
@@ -258,7 +260,11 @@ void setup() {
 
   configuration.begin();
   const LightingConfig& lightingConfig = configuration.get();
+  diagnostics.reset({lightingConfig, "normal-boot", millis()});
   ledController.begin(lightingConfig.maxBrightness, lightingConfig.gamma);
+  // The first RMT channel fixes the group's interrupt priority. Allocate the
+  // LED chain at priority 3 before Arduino's RGB LED requests default priority.
+  rgbLedWrite(RGB_BUILTIN, 0, RGB_BRIGHTNESS, 0);
   leftPir.begin(setupStartedAtMs);
   rightPir.begin(setupStartedAtMs);
   startI2cBus();
@@ -292,6 +298,7 @@ void loop() {
 
   const bool configModeActive = operatingMode.isConfigMode();
   if (!configModeWasActive && configModeActive) {
+    rgbLedWrite(RGB_BUILTIN, RGB_BRIGHTNESS, 0, 0);
     applyActiveConfiguration(nowMs, true);
     Serial.println("PIR and lux/BH1750 triggers ignored in CONFIG MODE");
     if (!webConfig.begin(nowMs)) {
@@ -302,8 +309,12 @@ void loop() {
   }
   configModeWasActive = configModeActive;
 
+  const uint32_t serialStartedUs = micros();
   serialCli.update();
+  diagnostics.operation({DiagnosticWork::SERIAL_CLI, millis(), micros() - serialStartedUs});
+  const uint32_t httpStartedUs = micros();
   webConfig.update(nowMs);
+  diagnostics.operation({DiagnosticWork::HTTP, millis(), micros() - httpStartedUs});
   if (restartNormalIfRequested()) {
     return;
   }
@@ -326,7 +337,9 @@ void loop() {
   }
   serviceModeWasActive = serviceModeActive;
 
+  const uint32_t luxStartedUs = micros();
   logLux(runtimeNowMs);
+  diagnostics.operation({DiagnosticWork::LUX, millis(), micros() - luxStartedUs});
 
   const bool leftTriggered = leftPir.update(runtimeNowMs);
   const bool rightTriggered = rightPir.update(runtimeNowMs);
@@ -342,7 +355,7 @@ void loop() {
 
     if (configModeActive && webConfig.isAnimationTestActive() &&
         !serviceModeActive) {
-      animation.update(runtimeNowMs, false);
+      webConfig.updateAnimationTest(runtimeNowMs);
     } else if (!configModeActive && !serviceModeActive) {
       animation.update(runtimeNowMs, false);
     }
@@ -351,7 +364,7 @@ void loop() {
 
   if (configModeActive) {
     if (webConfig.isAnimationTestActive() && !serviceModeActive) {
-      animation.update(runtimeNowMs, false);
+      webConfig.updateAnimationTest(runtimeNowMs);
     }
     return;
   }

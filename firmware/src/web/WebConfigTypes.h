@@ -29,3 +29,9 @@ struct WebConfigSettings {
   uint32_t stripTestTimeoutMs;
   uint32_t restartDelayMs;
 };
+
+struct FirmwareImageInfo {
+  uint32_t sketchSizeBytes;
+  uint32_t freeSketchSpaceBytes;
+  uint32_t readDurationUs;
+};

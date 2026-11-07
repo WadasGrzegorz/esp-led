@@ -6,6 +6,7 @@
 
 #include "AccessPointCredentials.h"
 #include "WebConfigTypes.h"
+#include "../diagnostics/OutputDiagnostic.h"
 
 class WebConfigServer {
  public:
@@ -20,10 +21,15 @@ class WebConfigServer {
   bool isRunning() const;
   bool isAnimationTestActive() const;
   bool consumeConfigurationChanged();
+  void updateAnimationTest(uint32_t nowMs);
 
  private:
   void registerRoutes();
   void handleStatus();
+  void handleDiagnostics();
+  void handleDiagnosticsClear();
+  void handleDiagnosticsMark();
+  void handleDiagnosticRun();
   void handleGetConfig();
   void handleExportConfig();
   void handleImportConfig();
@@ -63,6 +69,9 @@ class WebConfigServer {
   const bool& hasLuxReading_;
   const float& currentLux_;
   const WebConfigSettings settings_;
+  FirmwareImageInfo firmwareImageInfo_ = {};
+  uint32_t firmwareImageInfoReads_ = 0;
+  OutputDiagnostic outputDiagnostic_;
   AccessPointCredentials credentials_;
   WebServer server_{80};
   bool routesRegistered_ = false;
@@ -70,6 +79,8 @@ class WebConfigServer {
   bool mdnsRunning_ = false;
   bool configurationChanged_ = false;
   bool animationTestActive_ = false;
+  bool diagnosticActive_ = false;
+  bool diagnosticCompleted_ = false;
   bool stripTestActive_ = false;
   bool firmwareUploadStarted_ = false;
   bool firmwareUploadFailed_ = false;

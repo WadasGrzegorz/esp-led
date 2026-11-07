@@ -6,9 +6,18 @@
 #include <esp_system.h>
 
 #include "../FirmwareInfo.h"
+#include "../diagnostics/Diagnostics.h"
+#include "../diagnostics/DiagnosticsJson.h"
 #include "WebUi.h"
 
 namespace {
+FirmwareImageInfo readFirmwareImageInfo() {
+  const uint32_t startedUs = micros();
+  const uint32_t sketchSizeBytes = ESP.getSketchSize();
+  const uint32_t freeSketchSpaceBytes = ESP.getFreeSketchSpace();
+  return {sketchSizeBytes, freeSketchSpaceBytes, micros() - startedUs};
+}
+
 String setupResultMessage(const SetupResult result) {
   switch (result) {
     case SetupResult::OK:
@@ -121,7 +130,8 @@ WebConfigServer::WebConfigServer(
       lightSensorAvailable_(dependencies.lightSensorAvailable),
       hasLuxReading_(dependencies.hasLuxReading),
       currentLux_(dependencies.currentLux),
-      settings_(settings) {}
+      settings_(settings),
+      outputDiagnostic_(dependencies.leds) {}
 
 void WebConfigServer::ensureWirelessOff() {
   WiFi.setAutoReconnect(false);
@@ -135,6 +145,13 @@ bool WebConfigServer::begin(const uint32_t nowMs) {
   }
   if (!operatingMode_.isConfigMode() || !credentials_.begin()) {
     return false;
+  }
+
+  // Arduino 3.3.9 getSketchSize() verifies the entire flash image. Do this
+  // once, before the AP accepts animation/status requests, never per poll.
+  if (firmwareImageInfoReads_ == 0) {
+    firmwareImageInfo_ = readFirmwareImageInfo();
+    ++firmwareImageInfoReads_;
   }
 
   WiFi.mode(WIFI_AP);
@@ -188,10 +205,6 @@ void WebConfigServer::update(const uint32_t nowMs) {
     Serial.println("Web Config: strip test stopped automatically");
   }
 
-  if (animationTestActive_ && animation_.isOff()) {
-    animationTestActive_ = false;
-  }
-
   if (restartScheduled_ && deadlineReached(nowMs, restartAtMs_)) {
     Serial.println("Web Config: stopping AP/server and restarting NORMAL");
     end();
@@ -235,6 +248,31 @@ bool WebConfigServer::isAnimationTestActive() const {
   return animationTestActive_;
 }
 
+void WebConfigServer::updateAnimationTest(const uint32_t nowMs) {
+  if (!running_ || !operatingMode_.isConfigMode() || !animationTestActive_) return;
+  if (diagnosticActive_) {
+    outputDiagnostic_.update(nowMs);
+    if (outputDiagnostic_.isActive()) return;
+  } else {
+    animation_.update(nowMs, false);  // PIR and lux never drive a CONFIG MODE test.
+    if (!animation_.isOff()) return;
+  }
+  animationTestActive_ = false;
+  if (!diagnosticActive_) {
+    if (diagnostics.stripNumber() != 0) {
+      diagnostics.finish({millis(), "completed"});
+    }
+    return;
+  }
+  diagnosticActive_ = false;
+  diagnosticCompleted_ = true;
+  const LightingConfig& working = configuration_.get();
+  leds_.configure(min(working.maxBrightness, hardware::CONFIG_TEST_MAX_BRIGHTNESS), working.gamma);
+  diagnostics.record({nowMs, DiagnosticKind::WEB,
+                      "Diagnostic complete; working brightness/gamma restored; NVS unchanged"});
+  diagnostics.finish({millis(), "completed"});
+}
+
 bool WebConfigServer::consumeConfigurationChanged() {
   const bool changed = configurationChanged_;
   configurationChanged_ = false;
@@ -257,6 +295,10 @@ void WebConfigServer::registerRoutes() {
     sendOk("session activity recorded");
   });
   server_.on("/api/status", HTTP_GET, [this]() { handleStatus(); });
+  server_.on("/api/diagnostics", HTTP_GET, [this]() { handleDiagnostics(); });
+  server_.on("/api/diagnostics/clear", HTTP_POST, [this]() { handleDiagnosticsClear(); });
+  server_.on("/api/diagnostics/mark", HTTP_POST, [this]() { handleDiagnosticsMark(); });
+  server_.on("/api/diagnostics/run", HTTP_POST, [this]() { handleDiagnosticRun(); });
   server_.on("/api/config", HTTP_GET, [this]() { handleGetConfig(); });
   server_.on("/api/config", HTTP_PUT, [this]() { handlePutConfig(); });
   server_.on("/api/config/export", HTTP_GET,
@@ -310,7 +352,20 @@ void WebConfigServer::handleStatus() {
   document["maxStrips"] = MAX_STRIPS;
   document["maxPixels"] = settings_.logicalPixelLimit;
   document["animationTestActive"] = animationTestActive_;
+  document["diagnosticActive"] = diagnosticActive_;
   document["stripTestActive"] = setup_.isStripTestActive();
+  JsonObject capture = document["diagnostics"].to<JsonObject>();
+  capture["captureId"] = diagnostics.captureId();
+  capture["frozen"] = diagnostics.frozen();
+  capture["phase"] = diagnostics.phase();
+  capture["testStripNumber"] = diagnostics.stripNumber();
+  capture["frames"] = diagnostics.stats().frames;
+  capture["errors"] = diagnostics.stats().fadeOutIncreaseFrames +
+                      diagnostics.stats().invalidFrames + diagnostics.stats().invalidWrites +
+                      diagnostics.stats().ditheredFrames + diagnostics.stats().constantFrameChanges +
+                      diagnostics.rmtStats().mismatchFrames + diagnostics.rmtStats().missingCallbacks +
+                      diagnostics.rmtStats().unexpectedCallbacks +
+                      diagnostics.rmtStats().bufferChangedDuringTransfer + diagnostics.rmtStats().apiErrors;
 
   JsonObject device = document["device"].to<JsonObject>();
   device["firmwareVersion"] = LEDBOX_FIRMWARE_VERSION;
@@ -319,8 +374,10 @@ void WebConfigServer::handleStatus() {
   device["uptimeMs"] = nowMs;
   device["freeHeapBytes"] = ESP.getFreeHeap();
   device["minimumFreeHeapBytes"] = ESP.getMinFreeHeap();
-  device["sketchSizeBytes"] = ESP.getSketchSize();
-  device["freeSketchSpaceBytes"] = ESP.getFreeSketchSpace();
+  device["sketchSizeBytes"] = firmwareImageInfo_.sketchSizeBytes;
+  device["freeSketchSpaceBytes"] = firmwareImageInfo_.freeSketchSpaceBytes;
+  device["sketchInfoReadUs"] = firmwareImageInfo_.readDurationUs;
+  device["sketchInfoReads"] = firmwareImageInfoReads_;
   device["apStations"] = WiFi.softAPgetStationNum();
 
   JsonObject sensors = document["sensors"].to<JsonObject>();
@@ -353,6 +410,166 @@ void WebConfigServer::handleStatus() {
     lengths.add(setup_.cursor() - setup_.currentStripStart() + 1);
   }
   sendDocument(server_, 200, document);
+}
+
+void WebConfigServer::handleDiagnostics() {
+  if (!requireConfigMode()) return;
+  if (animationTestActive_) {
+    sendError(409, "finish or stop the animation before loading the full report");
+    return;
+  }
+  JsonDocument document;
+  document["schemaVersion"] = 1;
+  document["firmwareVersion"] = LEDBOX_FIRMWARE_VERSION;
+  document["firmwareMd5"] = ESP.getSketchMD5();
+  document["sketchSizeBytes"] = firmwareImageInfo_.sketchSizeBytes;
+  document["freeSketchSpaceBytes"] = firmwareImageInfo_.freeSketchSpaceBytes;
+  document["sketchInfoReadUs"] = firmwareImageInfo_.readDurationUs;
+  document["sketchInfoReads"] = firmwareImageInfoReads_;
+  document["chipModel"] = ESP.getChipModel();
+  document["chipRevision"] = ESP.getChipRevision();
+  document["cpuFrequencyMHz"] = ESP.getCpuFreqMHz();
+  document["idfVersion"] = ESP.getSdkVersion();
+  document["apStations"] = WiFi.softAPgetStationNum();
+  document["buildTimestamp"] = LEDBOX_BUILD_TIMESTAMP;
+  document["uptimeMs"] = millis();
+  document["resetReason"] = resetReasonName(esp_reset_reason());
+  document["freeHeapBeforeReportBytes"] = ESP.getFreeHeap();
+  document["minimumFreeHeapBytes"] = ESP.getMinFreeHeap();
+  document["mode"] = "CONFIG_MODE";
+  document["animationTestActive"] = animationTestActive_;
+  document["diagnosticActive"] = diagnosticActive_;
+  document["diagnosticCompleted"] = diagnosticCompleted_;
+  document["diagnosticPlan"] = strcmp(diagnostics.context(), "one-click-diagnostic") == 0
+      ? "output-comparison-v4: high=80 and low=8 no-refresh/fast/50Hz (4s each); levels 1..7 hold 1s / repeat 1s each; then 3s in / 2s hold / 5s out; gamma=1; no waterfall/PIR; about 48s"
+      : "custom/normal: see captureConfig";
+  document["calibrationActive"] = setup_.isCalibrationActive();
+  document["stripTestActive"] = setup_.isStripTestActive();
+  document["leftPirActive"] = leftPir_.isActive();
+  document["rightPirActive"] = rightPir_.isActive();
+  document["pirIgnoredInConfigMode"] = true;
+  document["hasLuxReading"] = hasLuxReading_;
+  if (hasLuxReading_) document["currentLux"] = currentLux_;
+  document["bh1750Available"] = lightSensorAvailable_;
+  document["maxLogicalPixels"] = MAX_LOGICAL_PIXELS;
+  document["controllerCount"] = hardware::WS2811_CONTROLLER_COUNT;
+  document["dataPin"] = hardware::DATA_PIN;
+  document["fastLedVersion"] = FASTLED_VERSION;
+  document["outputBackend"] = "RMT5 synchronous; requested priority 3; encoder in IRAM";
+  document["wireOrder"] = "GRB; three monochrome sections per CRGB controller";
+  document["currentOutputBrightness"] = FastLED.getBrightness();
+  document["currentOutputDitherMode"] = FastLED[0].getDither();
+  document["captureId"] = diagnostics.captureId();
+  document["captureStartedAtMs"] = diagnostics.startedAtMs();
+  document["captureFinishedAtMs"] = diagnostics.finishedAtMs();
+  document["captureFrozen"] = diagnostics.frozen();
+  document["captureOutcome"] = diagnostics.outcome();
+  document["context"] = diagnostics.context();
+  document["phase"] = diagnostics.phase();
+  document["logCapacity"] = DIAGNOSTIC_LOG_CAPACITY;
+  document["overwrittenEntries"] = diagnostics.overwritten();
+  document["wireMeasured"] = false;
+  document["interpretation"] =
+      "Software buffer, actual RMT input bytes and task timings only. Estimated output assumes default FastLED correction. "
+      "No measurement of DATA at the strip, supply voltage, or actual LED light. "
+      "Zero software errors do not prove that wiring or the RMT waveform is correct.";
+  document["storage"] = "RAM only; cleared by reboot or a new animation test";
+  document["sampleIntervalMs"] = 500;
+  document["frameAnalysis"] = "Every frame checked; FRAME log rows sampled";
+  JsonDocument captureConfig;
+  writeConfig(captureConfig, diagnostics.config());
+  document["captureConfig"] = captureConfig.as<JsonVariantConst>();
+  JsonDocument workingConfig;
+  writeConfig(workingConfig, configuration_.get());
+  document["currentWorkingConfig"] = workingConfig.as<JsonVariantConst>();
+
+  const DiagnosticFrameStats& stats = diagnostics.stats();
+  JsonObject frames = document["frames"].to<JsonObject>();
+  frames["count"] = stats.frames;
+  frames["zeroFrames"] = stats.zeroFrames;
+  frames["repeatedFrames"] = stats.repeatedFrames;
+  frames["fadeOutIncreaseFrames"] = stats.fadeOutIncreaseFrames;
+  frames["firstIncreaseAtMs"] = stats.firstIncreaseAtMs;
+  frames["firstIncreasePixel"] = stats.firstIncreasePixel;
+  frames["firstIncreaseFrom"] = stats.firstIncreaseFrom;
+  frames["firstIncreaseTo"] = stats.firstIncreaseTo;
+  frames["invalidWrites"] = stats.invalidWrites;
+  frames["invalidFrames"] = stats.invalidFrames;
+  frames["ditheredFrames"] = stats.ditheredFrames;
+  frames["constantFrameChanges"] = stats.constantFrameChanges;
+  frames["transmitMinUs"] = stats.frames ? stats.txMinUs : 0;
+  frames["transmitMaxUs"] = stats.txMaxUs;
+  frames["transmitAverageUs"] = stats.frames ? stats.txTotalUs / stats.frames : 0;
+  frames["analysisMaxUs"] = stats.analysisMaxUs;
+  frames["analysisAverageUs"] = stats.frames ? stats.analysisTotalUs / stats.frames : 0;
+  frames["activeFrameGapMaxMs"] = stats.activeFrameGapMaxMs;
+  JsonObject work = document["loopWorkMaxUs"].to<JsonObject>();
+  work["http"] = stats.httpMaxUs;
+  work["serialCli"] = stats.serialMaxUs;
+  work["luxI2c"] = stats.luxMaxUs;
+  frames["lastFrameAtMs"] = stats.lastFrameAtMs;
+  frames["lastRawMin"] = stats.rawMin;
+  frames["lastRawMax"] = stats.rawMax;
+  frames["lastEstimatedMin"] = stats.estimatedMin;
+  frames["lastEstimatedMax"] = stats.estimatedMax;
+  frames["lastEstimatedLitPixels"] = stats.litPixels;
+  frames["lastEffectiveBrightness"] = stats.brightness;
+  frames["lastEstimatedHash"] = stats.hash;
+  frames["hashAlgorithm"] = "FNV-1a 32-bit over estimated output bytes in logical GRB order";
+  writeDiagnosticDetails(document, diagnostics);
+
+  JsonArray entries = document["events"].to<JsonArray>();
+  for (uint16_t index = 0; index < diagnostics.count(); ++index) {
+    const DiagnosticEntry& entry = *diagnostics.entry(index);
+    JsonObject item = entries.add<JsonObject>();
+    item["sequence"] = entry.sequence;
+    item["atMs"] = entry.atMs;
+    item["kind"] = Diagnostics::kindName(entry.kind);
+    item["message"] = entry.message;
+  }
+  sendDocument(server_, 200, document);
+}
+
+void WebConfigServer::handleDiagnosticsClear() {
+  if (!requireConfigMode()) return;
+  if (animationTestActive_) {
+    sendError(409, "stop the animation before clearing its report");
+    return;
+  }
+  diagnosticCompleted_ = false;
+  diagnostics.reset({configuration_.get(), "manual-clear", millis()});
+  noteActivity(millis());
+  sendOk("diagnostic log cleared in RAM");
+}
+
+void WebConfigServer::handleDiagnosticsMark() {
+  if (!requireConfigMode()) return;
+  diagnostics.record({millis(), DiagnosticKind::MARK,
+                      "User observed flicker (timestamp is device request receipt time)"});
+  noteActivity(millis());
+  sendOk("flicker marker recorded");
+}
+
+void WebConfigServer::handleDiagnosticRun() {
+  if (!requireConfigMode()) return;
+  if (setup_.isCalibrationActive()) {
+    sendError(409, "finish or cancel calibration before running diagnostics");
+    return;
+  }
+  const uint32_t nowMs = millis();
+  stopVisualActions(nowMs, false);
+  const auto plan = animationDiagnosticConfig(configuration_.get());
+  const auto validation = configuration_.validate(plan);
+  if (!validation.valid()) {
+    sendError(422, configValidationErrorName(validation.error));
+    return;
+  }
+  diagnosticCompleted_ = false;
+  diagnosticActive_ = true;
+  outputDiagnostic_.begin({configuration_.get(), nowMs});
+  animationTestActive_ = true;
+  noteActivity(nowMs);
+  sendOk("diagnostic started: static/repeat, low levels 1..7, then fade; about 48s; NVS unchanged");
 }
 
 void WebConfigServer::handleGetConfig() {
@@ -401,6 +618,10 @@ void WebConfigServer::handlePutConfig() {
   if (!requireConfigMode()) {
     return;
   }
+  if (diagnosticActive_) {
+    sendError(409, "stop the diagnostic before changing working settings");
+    return;
+  }
   if (setup_.isCalibrationActive()) {
     sendError(409, "finish or cancel calibration before changing config");
     return;
@@ -409,6 +630,9 @@ void WebConfigServer::handlePutConfig() {
   JsonDocument document;
   if (!parseRequest(document) || !updateWorkingConfig(document)) {
     return;
+  }
+  if (animationTestActive_ && diagnostics.stripNumber() != 0) {
+    stopVisualActions(millis(), false);
   }
   configurationChanged_ = true;
   noteActivity(millis());
@@ -483,8 +707,7 @@ void WebConfigServer::handleStripTest() {
     return;
   }
   SetupResult result = SetupResult::OK;
-  animation_.begin(millis());
-  animationTestActive_ = false;
+  stopVisualActions(millis(), false);
   if (active) {
     result = setup_.testStrip(static_cast<uint8_t>(stripNumber));
     if (result == SetupResult::OK) {
@@ -521,20 +744,46 @@ void WebConfigServer::handleAnimationTest() {
     sendError(400, "direction must be left or right");
     return;
   }
+  const JsonVariantConst stripValue = document["strip"];
+  const bool hasStrip = !stripValue.isUnbound();
+  if (hasStrip && !stripValue.is<uint32_t>()) {
+    sendError(400, "strip must be an integer strip number");
+    return;
+  }
+  const uint32_t requestedStrip = hasStrip ? stripValue.as<uint32_t>() : 0;
+  if (hasStrip && (requestedStrip == 0 || requestedStrip > configuration_.get().stripCount)) {
+    sendError(422, "strip number is outside the configured geometry");
+    return;
+  }
+  const uint8_t stripNumber = static_cast<uint8_t>(requestedStrip);
 
   if (setup_.isStripTestActive()) {
     setup_.stopStripTest();
     stripTestActive_ = false;
   }
   const uint32_t nowMs = millis();
+  if (diagnosticActive_) stopVisualActions(nowMs, false);
+  diagnosticCompleted_ = false;
+  char context[24];
+  if (hasStrip) {
+    snprintf(context, sizeof(context), "web-strip-%u-%s", stripNumber, direction.c_str());
+  } else {
+    snprintf(context, sizeof(context), "web-test-%s", direction.c_str());
+  }
+  diagnostics.reset({configuration_.get(), context, nowMs, stripNumber});
   animation_.begin(nowMs);
+  if (hasStrip && !animation_.selectStripForTest(stripNumber)) {
+    sendError(500, "cannot select strip for animation test");
+    return;
+  }
   animation_.trigger(direction == "left"
                          ? AnimationEngine::Direction::LEFT_TO_RIGHT
                          : AnimationEngine::Direction::RIGHT_TO_LEFT,
                      nowMs);
   animationTestActive_ = true;
   noteActivity(nowMs);
-  sendOk("animation test started");
+  sendOk(hasStrip ? "single-strip animation started; other strips stay off; configured timing preserved"
+                  : "animation test started");
 }
 
 void WebConfigServer::handleStopTest() {
@@ -545,7 +794,11 @@ void WebConfigServer::handleStopTest() {
     sendError(409, "cancel or finish calibration instead of stopping a test");
     return;
   }
+  diagnostics.record({millis(), DiagnosticKind::WEB, "User stopped test"});
   stopVisualActions(millis(), false);
+  if (strcmp(diagnostics.context(), "one-click-diagnostic") == 0 || diagnostics.stripNumber() != 0) {
+    diagnostics.finish({millis(), "stopped"});
+  }
   noteActivity(millis());
   sendOk("visual test stopped");
 }
@@ -903,6 +1156,9 @@ void WebConfigServer::sendOk(const char* message) {
 
 void WebConfigServer::sendError(const uint16_t statusCode,
                                 const String& message) {
+  char event[DIAGNOSTIC_MESSAGE_SIZE];
+  snprintf(event, sizeof(event), "HTTP %u: %s", statusCode, message.c_str());
+  diagnostics.record({millis(), DiagnosticKind::ERROR, event});
   JsonDocument document;
   document["ok"] = false;
   document["error"] = message;
@@ -916,6 +1172,13 @@ void WebConfigServer::sendSetupError(const SetupResult result) {
 
 void WebConfigServer::stopVisualActions(const uint32_t nowMs,
                                         const bool includeCalibration) {
+  const bool stopStripAnimation = animationTestActive_ && diagnostics.stripNumber() != 0;
+  if (diagnosticActive_) {
+    outputDiagnostic_.stop(nowMs);
+    diagnosticActive_ = false;
+    const LightingConfig& working = configuration_.get();
+    leds_.configure(min(working.maxBrightness, hardware::CONFIG_TEST_MAX_BRIGHTNESS), working.gamma);
+  }
   if (includeCalibration && setup_.isCalibrationActive()) {
     setup_.cancelCalibration();
   } else if (setup_.isStripTestActive()) {
@@ -926,6 +1189,7 @@ void WebConfigServer::stopVisualActions(const uint32_t nowMs,
   animation_.begin(nowMs);
   leds_.clear();
   leds_.show();
+  if (stopStripAnimation) diagnostics.finish({millis(), "stopped"});
 }
 
 void WebConfigServer::noteActivity(const uint32_t nowMs) {

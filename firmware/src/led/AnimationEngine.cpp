@@ -1,5 +1,9 @@
 #include "AnimationEngine.h"
 
+#include <stdio.h>
+
+#include "../diagnostics/Diagnostics.h"
+
 namespace {
 constexpr uint8_t FULL_LEVEL = 255;
 constexpr uint32_t MIN_WATERFALL_PIXEL_FADE_MS = 120;
@@ -12,8 +16,8 @@ AnimationEngine::AnimationEngine(LedController& leds,
     : leds_(leds), config_(config) {}
 
 void AnimationEngine::begin(const uint32_t nowMs) {
-  state_ = State::OFF;
-  stateStartedAtMs_ = nowMs;
+  transitionTo(State::OFF, nowMs, "reset/test/config");
+  testStripNumber_ = 0;
   lastRenderedAtMs_ = UINT32_MAX;
   for (uint8_t stripIndex = 0; stripIndex < MAX_STRIPS; ++stripIndex) {
     stripLevels_[stripIndex] = 0;
@@ -28,6 +32,14 @@ void AnimationEngine::begin(const uint32_t nowMs) {
   Serial.print("All ");
   Serial.print(config_.stripCount);
   Serial.println(" strips OFF");
+}
+
+bool AnimationEngine::selectStripForTest(const uint8_t stripNumber) {
+  if (!isOff() || stripNumber == 0 || stripNumber > config_.stripCount) {
+    return false;
+  }
+  testStripNumber_ = stripNumber;
+  return true;
 }
 
 void AnimationEngine::update(const uint32_t nowMs, const bool motionActive) {
@@ -47,10 +59,11 @@ void AnimationEngine::update(const uint32_t nowMs, const bool motionActive) {
       }
       return;
     case State::FADING_IN:
-      renderFadeIn(elapsedMs);
       if (elapsedMs >= cascadeDurationMs_) {
         enterOn(nowMs);
+        return;
       }
+      renderFadeIn(elapsedMs);
       return;
     case State::ON:
       if (motionActive) {
@@ -64,16 +77,20 @@ void AnimationEngine::update(const uint32_t nowMs, const bool motionActive) {
       }
       return;
     case State::FADING_OUT:
-      renderFadeOut(elapsedMs);
       if (elapsedMs >= config_.fadeOutMs) {
         enterOff(nowMs);
+        return;
       }
+      renderFadeOut(elapsedMs);
       return;
   }
 }
 
 void AnimationEngine::trigger(const Direction direction,
                               const uint32_t nowMs) {
+  char event[96];
+  snprintf(event, sizeof(event), "trigger=%s state=%s", directionName(direction), stateName(state_));
+  diagnostics.record({nowMs, DiagnosticKind::MOTION, event});
   switch (state_) {
     case State::OFF:
       if (config_.startDelayMs == 0) {
@@ -81,8 +98,7 @@ void AnimationEngine::trigger(const Direction direction,
         return;
       }
       direction_ = direction;
-      state_ = State::WAITING_TO_START;
-      stateStartedAtMs_ = nowMs;
+      transitionTo(State::WAITING_TO_START, nowMs, "motion");
       Serial.print("Motion ");
       Serial.print(directionName(direction_));
       Serial.print(" -> animation starts in ");
@@ -105,7 +121,8 @@ void AnimationEngine::trigger(const Direction direction,
       Serial.println(directionName(direction));
       return;
     case State::FADING_OUT:
-      updateFadeOutLevels(nowMs - stateStartedAtMs_);
+      // Resume from the last DISPLAYED levels. Advancing the fade-out here
+      // would introduce a downward step just as motion reverses the fade.
       startCascade(direction, nowMs);
       return;
   }
@@ -116,8 +133,9 @@ bool AnimationEngine::isOff() const { return state_ == State::OFF; }
 void AnimationEngine::startCascade(const Direction direction,
                                    const uint32_t nowMs) {
   direction_ = direction;
-  state_ = State::FADING_IN;
-  stateStartedAtMs_ = nowMs;
+  transitionTo(State::FADING_IN, nowMs,
+               state_ == State::FADING_OUT ? "PIR trigger"
+                                           : "motion/start delay completed");
   cascadeDurationMs_ = 0;
 
   uint32_t nextStripStartMs = 0;
@@ -156,13 +174,16 @@ void AnimationEngine::startCascade(const Direction direction,
 }
 
 void AnimationEngine::startFadeOut(const uint32_t nowMs) {
+  if (state_ == State::FADING_OUT) {
+    Serial.println("Animation error: fade-out restart rejected");
+    return;
+  }
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     fadeOutStartLevels_[stripIndex] = stripLevels_[stripIndex];
   }
 
-  state_ = State::FADING_OUT;
-  stateStartedAtMs_ = nowMs;
+  transitionTo(State::FADING_OUT, nowMs, "hold elapsed; both PIRs LOW/test");
   if (config_.fadeOutStyle == FadeOutStyle::CASCADE) {
     Serial.print("Cascade fade-out started ");
     printCascadeName();
@@ -173,8 +194,7 @@ void AnimationEngine::startFadeOut(const uint32_t nowMs) {
 }
 
 void AnimationEngine::enterOn(const uint32_t nowMs) {
-  state_ = State::ON;
-  stateStartedAtMs_ = nowMs;
+  transitionTo(State::ON, nowMs, "fade-in complete");
 
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
@@ -188,15 +208,19 @@ void AnimationEngine::enterOn(const uint32_t nowMs) {
 }
 
 void AnimationEngine::enterOff(const uint32_t nowMs) {
-  state_ = State::OFF;
-  stateStartedAtMs_ = nowMs;
-
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     stripLevels_[stripIndex] = 0;
   }
 
-  renderLevels();
+  // Blacken the complete chain, including currently unused capacity. The
+  // PlatformIO RMT5 backport completes this transfer before show() returns.
+  leds_.clear();
+  leds_.show();
+  testStripNumber_ = 0;
+  transitionTo(State::OFF, nowMs, "fade-out complete");
+  Serial.print("LED OFF frame: bufferMax=");
+  Serial.println(leds_.maxBufferLevel());
   Serial.print("All ");
   Serial.print(config_.stripCount);
   Serial.println(" strips OFF");
@@ -237,6 +261,11 @@ void AnimationEngine::renderWaterfallFadeIn(const uint32_t elapsedMs) {
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     const StripConfig& strip = config_.strips[stripIndex];
+    if (!isStripVisible(stripIndex)) {
+      leds_.setRange(stripStartPixel, strip.pixelCount, 0);
+      stripStartPixel += strip.pixelCount;
+      continue;
+    }
     const uint8_t startLevel = fadeInStartLevels_[stripIndex];
     const uint32_t startsAtMs = stripFadeInStartedAtMs_[stripIndex];
     const uint32_t durationMs = stripFadeInDurationsMs_[stripIndex];
@@ -324,7 +353,8 @@ void AnimationEngine::renderLevels() {
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
        ++stripIndex) {
     const StripConfig& strip = config_.strips[stripIndex];
-    leds_.setRange(startPixel, strip.pixelCount, stripLevels_[stripIndex]);
+    const uint8_t level = isStripVisible(stripIndex) ? stripLevels_[stripIndex] : 0;
+    leds_.setRange(startPixel, strip.pixelCount, level);
     startPixel += strip.pixelCount;
   }
   leds_.show();
@@ -360,6 +390,12 @@ uint8_t AnimationEngine::stripIndexAt(const uint8_t orderPosition) const {
     return orderPosition;
   }
   return config_.stripCount - 1 - orderPosition;
+}
+
+bool AnimationEngine::isStripVisible(const uint8_t stripIndex) const {
+  // Preserve full geometry, physical offsets and animation timing. Only the
+  // displayed output is filtered during an explicitly selected service test.
+  return testStripNumber_ == 0 || stripIndex + 1 == testStripNumber_;
 }
 
 uint32_t AnimationEngine::waterfallPixelStepMs() const {
@@ -412,4 +448,34 @@ void AnimationEngine::printCascadeName() const {
     }
     Serial.print(stripIndexAt(orderPosition) + 1);
   }
+}
+
+void AnimationEngine::transitionTo(const State nextState,
+                                   const uint32_t nowMs,
+                                   const char* reason) {
+  diagnostics.transition({stateName(state_), stateName(nextState), reason, nowMs});
+  if (state_ != nextState) {
+    Serial.print("Animation @");
+    Serial.print(nowMs);
+    Serial.print(" ms: ");
+    Serial.print(stateName(state_));
+    Serial.print(" -> ");
+    Serial.print(stateName(nextState));
+    Serial.print(" (");
+    Serial.print(reason);
+    Serial.println(")");
+  }
+  state_ = nextState;
+  stateStartedAtMs_ = nowMs;
+}
+
+const char* AnimationEngine::stateName(const State state) {
+  switch (state) {
+    case State::OFF: return "OFF";
+    case State::WAITING_TO_START: return "WAITING_TO_START";
+    case State::FADING_IN: return "FADING_IN";
+    case State::ON: return "ON";
+    case State::FADING_OUT: return "FADING_OUT";
+  }
+  return "UNKNOWN";
 }

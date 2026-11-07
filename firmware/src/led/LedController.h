@@ -14,6 +14,7 @@ class LedController {
   void configure(uint8_t maxBrightness, float gamma);
   void clear();
   void show();
+  uint8_t maxBufferLevel() const;
   void setAll(uint8_t linearLevel);
   void setRange(uint16_t startPixel, uint16_t pixelCount,
                 uint8_t linearLevel);
