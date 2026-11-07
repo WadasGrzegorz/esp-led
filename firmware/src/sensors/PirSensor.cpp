@@ -1,5 +1,9 @@
 #include "PirSensor.h"
 
+#include <stdio.h>
+
+#include "../diagnostics/Diagnostics.h"
+
 PirSensor::PirSensor(const uint8_t pin, const uint32_t debounceMs,
                      const uint32_t minRetriggerMs)
     : pin_(pin),
@@ -13,6 +17,9 @@ void PirSensor::begin(const uint32_t nowMs) {
   pinMode(pin_, INPUT);
   rawHigh_ = digitalRead(pin_) == HIGH;
   stableHigh_ = rawHigh_;
+  char event[64];
+  snprintf(event, sizeof(event), "GPIO%u stable=%s", pin_, stableHigh_ ? "HIGH" : "LOW");
+  diagnostics.record({nowMs, DiagnosticKind::PIR, event});
   armed_ = !stableHigh_;
   hasTriggered_ = false;
   rawChangedAtMs_ = nowMs;
@@ -39,6 +46,9 @@ bool PirSensor::update(const uint32_t nowMs) {
 
   stableHigh_ = rawHigh_;
   Serial.print("PIR GPIO");
+  char event[80];
+  snprintf(event, sizeof(event), "GPIO%u stable=%s", pin_, stableHigh_ ? "HIGH" : "LOW");
+  diagnostics.record({nowMs, DiagnosticKind::PIR, event});
   Serial.print(pin_);
   Serial.print(" stable ");
   Serial.println(stableHigh_ ? "HIGH" : "LOW");
@@ -61,6 +71,8 @@ bool PirSensor::update(const uint32_t nowMs) {
 
   hasTriggered_ = true;
   lastTriggeredAtMs_ = nowMs;
+  snprintf(event, sizeof(event), "GPIO%u edge accepted by debounce/retrigger filter", pin_);
+  diagnostics.record({nowMs, DiagnosticKind::PIR, event});
   return true;
 }
 

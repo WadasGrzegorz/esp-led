@@ -15,6 +15,7 @@ class AnimationEngine {
   AnimationEngine(LedController& leds, const LightingConfig& config);
 
   void begin(uint32_t nowMs);
+  bool selectStripForTest(uint8_t stripNumber);
   void update(uint32_t nowMs, bool motionActive);
   void trigger(Direction direction, uint32_t nowMs);
   bool isOff() const;
@@ -39,6 +40,7 @@ class AnimationEngine {
   void renderLevels();
   void logNewlyStartedStrips(uint32_t elapsedMs);
   uint8_t stripIndexAt(uint8_t orderPosition) const;
+  bool isStripVisible(uint8_t stripIndex) const;
   uint32_t waterfallPixelStepMs() const;
   uint32_t waterfallPixelFadeMs() const;
   uint32_t waterfallStripDurationMs(uint16_t pixelCount) const;
@@ -47,6 +49,8 @@ class AnimationEngine {
   static uint8_t fadeLevel(uint32_t elapsedMs, uint32_t durationMs);
   static const char* directionName(Direction direction);
   void printCascadeName() const;
+  void transitionTo(State nextState, uint32_t nowMs, const char* reason);
+  static const char* stateName(State state);
 
   LedController& leds_;
   const LightingConfig& config_;
@@ -55,6 +59,7 @@ class AnimationEngine {
   uint32_t stateStartedAtMs_ = 0;
   uint32_t lastRenderedAtMs_ = UINT32_MAX;
   uint32_t cascadeDurationMs_ = 0;
+  uint8_t testStripNumber_ = 0;
   uint8_t stripLevels_[MAX_STRIPS] = {};
   uint8_t fadeInStartLevels_[MAX_STRIPS] = {};
   uint8_t fadeOutStartLevels_[MAX_STRIPS] = {};

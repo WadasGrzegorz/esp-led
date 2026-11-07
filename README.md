@@ -182,16 +182,18 @@ The application buffer grows from 60 to 240 `CRGB` entries: 180 to 720 bytes,
 an increase of 540 bytes. The FastLED RMT5 driver also allocates a byte buffer
 of the same size, adding another 540 bytes at runtime. The two pixel buffers
 therefore grow by about 1080 bytes combined. Per-strip animation state and the
-NVS configuration size stay unchanged. A PlatformIO ESP32-C6 release build
-reports 49,880 bytes of static RAM (15.2% of its 327,680-byte budget) and
-1,209,086 bytes of application flash (61.5% of the OTA slot). Static RAM usage
-does not include the driver's heap allocation or Wi-Fi runtime allocations.
+NVS configuration size stay unchanged. `make prepare` reports current total
+static RAM and application flash usage, including the diagnostic recorder.
+Static RAM usage does not include the driver's heap allocation or Wi-Fi runtime
+allocations.
 
 FastLED 3.10.3 defines the WS2811 bit period as 320 + 320 + 640 ns and its RMT5
 driver uses a 280 us reset interval. At full capacity, the nominal wire budget
-is `720 * 8 * 1.28 us + 280 us`, approximately 7.7 ms per frame, or 130 frames/s
-before rendering and driver overhead. The 10 MHz RMT encoder quantizes these
-timings, so the actual wire period can be closer to 7.2 ms. The full buffer is
+is `720 * 8 * 1.28 us + 280 us`. Firmware 0.2.7 preserves the complete requested
+bit period when quantizing to 10 MHz RMT ticks: both bits take 1.3 us instead of
+the previous independently truncated 1.2 us. The configured symbol/reset budget
+is now `720 * 8 * 1.3 us + 280 us`, approximately 7.77 ms per frame, or 129 frames/s
+before rendering, driver and diagnostic overhead. The full buffer is
 transmitted even for shorter configured geometry, with unused sections off.
 Rendering still visits only configured sections: waterfall rendering and its
 gamma calculations are linear in their count (up to four times the prototype
@@ -216,7 +218,245 @@ both travel directions, reversed strips, waterfall, simultaneous/cascade starts
 and global/cascade fades. Node tests cover firmware-supplied UI limits, remaining
 capacity, invalid geometry, and unavailable capacity metadata.
 
+## Fade-out diagnostics and regression coverage
+
+Firmware 0.2.7 fixes encoder quantization: the high segment still uses whole
+ticks, while the low segment fills the rounded-up complete bit period. The
+actual WS2811 configuration becomes 0=300/1000 ns and 1=600/700 ns (1.3 us each).
+The [Worldsemi WS2811 V2.1 datasheet](https://www.hestore.eu/es/prod_getfile.php?id=20028)
+requires a bit period of at least 1.25 us. The previous 1.2 us configuration
+does not meet that revision; the exact IC revision in the advertised strip is
+unconfirmed. This establishes a protocol correction, not a proven flicker fix.
+The native test compiles the actual encoder initializer before/after the patch.
+
+Firmware 0.2.6 removes full firmware-image verification from the periodic status
+handler. In Arduino 3.3.9, `ESP.getSketchSize()` calls `esp_image_verify()` every
+time; it is not a cached size lookup. A 0.2.5 device capture showed HTTP work
+around 164 ms once per second and active frame gaps up to 181 ms, with all 1821
+submitted/completed RMT buffers matching the expected bytes. Such blocking holds
+the displayed level and makes the next fade update jump forward. It does not
+explain a verified upward optical flash by itself.
+
+Image size and OTA partition size are now read once before starting the AP and
+served from a RAM snapshot. Heap, PIR, geometry and animation state remain live.
+`sketchInfoReadUs` and `sketchInfoReads` expose the one-time read; its duration is
+excluded from the animation capture. A native regression test compiles the actual
+status handler and the installed Arduino sketch-size implementation: the previous
+path repeats full image verification for 100/100 status requests; the corrected
+path does not repeat it and preserves the live response fields. Physical flicker
+still requires device validation; passing this test establishes the polling fix.
+
+Firmware 0.2.7 extends the in-panel **Diagnostic report** with a controlled
+comparison of light with and without repeated DATA transmission. In CONFIG
+MODE, click **Run diagnostic**. It uses the applied geometry for these stages:
+
+1. `HOLD_HIGH`: brightness 80, one frame, then no LED refresh for 4 seconds.
+2. `REPEAT_HIGH`: resend that identical buffer for 4 seconds; no pixel rendering.
+3. `REPEAT_HIGH_50`: resend the same high buffer at up to 50 Hz for 4 seconds.
+4. `HOLD_LOW`: brightness 8 (raw 26 at brightness scale 80), one frame, then no
+   LED refresh for 4 seconds.
+5. `REPEAT_LOW`: resend that identical low buffer for 4 seconds.
+6. `REPEAT_LOW_50`: resend the same low buffer at up to 50 Hz for 4 seconds.
+7. `HOLD_1` / `REPEAT_1` through `HOLD_7` / `REPEAT_7`: each exact output level
+   holds for 1 second without refresh, then repeats identical frames for 1 second.
+   Input levels use ceiling division to produce these output bytes at brightness
+   scale 80 and gamma 1, without dithering. Each has a separate phase summary.
+8. Fade from black: simultaneous 3-second fade-in, 2-second hold and global
+   5-second fade-out. This is the same fade plan used in 0.2.3.
+
+Allow about 48 seconds. The UI displays the current stage. The limited-rate
+stages skip sends until 20 ms has elapsed; they do not catch up after a stall.
+Gamma is 1.0;
+Waterfall and PIR/lux triggering are excluded. Working settings and NVS are unchanged; working brightness/gamma are
+restored when it completes or is stopped. Calibration must finish or be
+cancelled before starting a diagnostic, and working edits are blocked during it.
+
+Click **Mark flicker** when an unwanted flash is visible. The marker is stamped
+when its HTTP request reaches the device, so it is approximate. After completion
+the report loads automatically; click **Copy report** and paste it into the
+conversation. **Stop test** also makes a partial report available. **Refresh
+report** reads the current capture after the animation; **Clear log** clears
+RAM only. Each animation test starts a new capture, so copy it before starting
+another test or restarting the device. Copy supports plain HTTP with a selection
+fallback if the browser blocks clipboard access.
+
+Completed and explicitly stopped one-click captures freeze in RAM, so idle
+status requests, PIR changes and sensor retries cannot overwrite the evidence.
+A new test, clear or reboot releases that capture. The UI caches the last loaded
+JSON in browser local storage when available, clearly labels restored copies,
+and offers **Download JSON** without making another device request. Local storage
+is specific to the browser/origin; copying/downloading is still the way to keep
+an independent file. If storage is blocked, the UI warns and keeps copy/download
+available. Full report requests return 409 while an animation test is running.
+
+The report includes build/reset/heap information, the exact capture settings
+and current working settings, PIR events, state transitions, estimated output
+hashes/min/max/lit counts, effective brightness, every-frame fade-out increase
+counters (including the first pixel and before/after values), range errors,
+transmit duration statistics, logging-analysis overhead and active frame gaps.
+It also checks that constant-stage software output stays unchanged, and measures
+HTTP, Serial CLI and lux/I2C work separately. Work taking at least 40 ms and new
+largest active frame gaps of at least 40 ms create `TIMING` events. Pauses in
+the no-refresh stages are intentional and are excluded from active frame gaps.
+Sensor reads/recovery are deferred while this separate diagnostic runner is
+active, just as during a normal animation.
+
+The driver hooks record actual bytes passed to `rmt_transmit()` and compare them
+byte-for-byte with the prepared software output; after successful wait-done they
+check that the submitted buffer was unchanged. Missing or unexpected callbacks
+are reported, as are RMT enable/transmit/wait/disable errors that return before
+a reset. The first mismatch keeps full expected/actual byte snapshots, including
+the last section. Initialization records the accepted channel configuration and
+the encoder's quantized ticks, resolution, reset, DMA and interrupt-priority
+settings. Hooks run in task context, with measured preparation/hook overhead;
+no diagnostic work is added to the encoder ISR. These are RMT inputs and API
+results, not electrical measurements or independent detection of RMT underruns.
+
+Up to 32 phase summaries retain frame counts, markers, hash changes, brightness,
+RMT mismatches/errors, HTTP/Serial/I2C maxima, transmit statistics and eight-bin
+histograms for frame gaps and transmit duration. Intentional no-refresh holds
+remain visible in their own phases. Summary overflow and event overwrite are
+explicitly reported; the UI labels missing/truncated telemetry **INCOMPLETE**.
+Firmware MD5, chip/revision, CPU clock, IDF version and AP client count accompany
+the report to identify the device and build.
+Typed event logging does not mirror Serial or include the AP password.
+
+The fixed RAM log holds 128 entries and reports overwritten entries. It checks
+all frames but samples ordinary FRAME rows at 500 ms, without per-frame Serial
+output or flash writes. The previous-output buffer is bounded by
+`MAX_LOGICAL_PIXELS`. Full reports are fetched after tests to reduce measurement
+interference; status polling stays lightweight. Native tests cover overflow,
+truncation, clock rollover, sampled and unsampled increases, the last section,
+immutable diagnostic settings, the complete comparison/fade sequence,
+identical repeated buffers, no-refresh holds, unused black pixels and stopping
+the diagnostic in each stage. Additional regression cases inject wrong outgoing
+bytes, mid-transfer mutation, missing/duplicate hooks and API errors, verify
+first-error snapshots and JSON serialization, and exercise freezing, histograms,
+browser caching, downloads and incomplete-capture warnings. A native test also
+compiles the patched C driver's actual submit/wait functions and checks its four
+API failure paths.
+
+If only repeated constant frames flicker, the fade calculations are not needed
+to reproduce the problem; the transmission/receiver path needs investigation.
+If light flickers in a no-refresh stage, repeated DATA is not needed either.
+Neither outcome alone identifies a particular component or proves faulty wiring.
+If only the final fades flicker, value-dependent transmission, LED dimming and
+rendering remain candidates. Copy the report and describe which stages flickered.
+
+`wireMeasured: false` is deliberate: hashes and brightness are software estimates
+after gamma/default brightness scaling, not measurements at the DATA pin or
+at the strip. A report with zero software errors does not establish that wiring
+is faulty or that the driver waveform is correct. If the light still flashes
+while recorded frames are monotonic, the next experiment needs a DATA waveform
+and/or supply measurement.
+
+The fade-out investigation reproduced two output-path problems in the pinned
+FastLED 3.10.3 dependency, independently of physical wiring:
+
+- RMT5 `loadPixelData()` wrote the driver's pixel buffer before the previous
+  asynchronous transfer finished. `drawAsync()` waited only after those writes.
+  `scripts/fastled_rmt5_buffer_guard.py` backports a `waitDone()` immediately
+  before the buffer is filled. PlatformIO applies this idempotently to its
+  generated `.pio/libdeps` source, including after dependencies are reinstalled.
+  The hook requires version 3.10.3 and fails on an unexpected source layout;
+  review the backport when upgrading FastLED. It waits on transfer completion,
+  without guessing a delay or increasing FPS. For a full buffer, one transfer
+  takes roughly the 7–8 ms wire budget described above.
+- Temporal dithering can increase a transmitted byte between frames even when
+  its input stays constant or decreases. At input 2 and brightness 80, upstream
+  `PixelController` produced upward steps between 0 and 1. `LedController`
+  disables dithering so gamma correction followed by brightness scaling is
+  deterministic and monotonic. Eight-bit quantization still produces plateaus
+  and visible steps near black, especially at low maximum brightness.
+
+Firmware 0.2.1 is the follow-up experiment for a reported bright flash at the
+end of the UI test. The RMT5 hook now also uses `drawSync()`, so the final black
+frame completes even when no later frame follows. `enterOff()` clears the
+entire buffer and sends it before reporting OFF; Serial then prints
+`LED OFF frame: bufferMax=0`. This reports the application buffer, not a
+measurement at the strip. An outstanding asynchronous transfer was reproduced
+in a host test, but that alone does not establish the cause of the physical
+flash. This build needs the same Global fade-out UI test on the device.
+
+Firmware 0.2.2 follows the observation that BOTH fade-in and fade-out flicker,
+while steady ON is stable. It fixes another concrete adapter defect: FastLED
+requests RMT interrupt priority 3, but `led_strip_rmt_dev.c` omitted it from the
+ESP-IDF channel configuration, leaving priority 0. A compiled test of the actual
+initializer reproduces 0 before the patch and 3 afterwards. The custom encode
+and reset callbacks are also placed in IRAM; ELF inspection confirms these and
+the IDF byte/copy encoders are in `.iram0.text`.
+
+The LED chain now initializes before the onboard RGB LED. ESP-IDF fixes interrupt
+priority for the entire RMT group when the first channel is created, so Arduino's
+later default-priority RGB request inherits priority 3 without a conflict.
+Green NORMAL/red CONFIG MODE behavior stays the same.
+
+This targets the documented risk of delayed refill interrupts making RMT send
+old symbols during streaming. It does not prove that underruns caused this
+installation's flicker; physical validation is still needed. References:
+[ESP32-C6 RMT FAQ](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32c6/api-reference/peripherals/rmt.html#faq)
+and [shared group priority](https://github.com/espressif/esp-idf/blob/v5.5.4/components/esp_driver_rmt/src/rmt_common.c).
+
+The state machine also sends only one frame on fade completion, and reverses
+from its last displayed levels when a new PIR edge interrupts fade-out. It no
+longer advances the fade to a lower, undisplayed brightness before reversing.
+Waterfall runs only during fade-in. With **Fade-out style = Global**, all
+configured sections fade together regardless of waterfall or strip orientation.
+The explicit **Cascade** fade-out setting remains supported. Fade interpolation
+is bounded; its largest level product is `255 * 255 = 65025`, and the rounded
+sum is 65152, so the 16-bit intermediate does not overflow. Unsigned elapsed
+time remains valid across `millis()` rollover. No API or NVS layout changed.
+
+Serial now logs timestamped state changes, for example:
+
+```text
+Animation @20300 ms: ON -> FADING_OUT (hold elapsed; both PIRs LOW/test)
+Animation @22940 ms: FADING_OUT -> OFF (fade-out complete)
+LED OFF frame: bufferMax=0
+```
+
+A new accepted edge during fade-out instead logs
+`FADING_OUT -> FADING_IN (PIR trigger)`. Continuous HIGH does not create new
+edges or log a message every frame. A repeated fade-out start is rejected and
+logged as an animation error.
+
+`make test` checks 290 fade-out cases with every-pixel monotonicity, brightness
+20/80/255, durations 1000/2640/5000 ms, waterfall on/off, reversed unequal strip
+lengths, five strips, full capacity, both fade-out styles, gamma bounds and
+clock rollover. It also tests smooth motion reversal, debouncing, sustained
+HIGH, hold extension and the PIR-to-animation flow. ASan/UBSan cover the native
+animation and RMT tests. `test/test_fastled_output.py` compiles the actual
+installed RMT5 driver before and after the backport: the original fixture
+performs 960 writes while transmitting; the guarded version performs none.
+The buffer-guard-only variant still returns with the last transfer pending;
+the synchronous variant completes it with all 720 bytes zero. Animation tests
+also verify that OFF remains black without new frames for the following second.
+It also runs the actual upstream `PixelController` scaling/dithering code.
+These dependency tests require the installed PlatformIO dependencies and are
+reported as skipped when those are absent. Native tests require Python 3,
+a C++17 compiler, and Node.js.
+
+Software regressions and buffer ownership are verified on the host; disappearance
+of the physical flicker still needs a device test. After deliberately installing
+the prepared firmware, use the existing CONFIG MODE animation test with Global
+fade-out, brightness 80 and fade-out 2.640 seconds, first with waterfall off,
+then on. This test already ignores PIR triggers without changing normal PIR
+behavior. Compare against NORMAL mode and capture the transition/PIR logs.
+If flicker persists without a `FADING_OUT -> FADING_IN` transition, compare
+GPIO4, level-shifter output, and DATA at the first strip with a logic analyzer,
+and measure the supply/common-ground behavior during dimming. Signal integrity,
+power transients and the strip's low-level PWM behavior remain unverified
+hardware hypotheses, rather than established causes.
+
+Upstream references: [RMT5 buffer filling](https://github.com/FastLED/FastLED/blob/3.10.3/src/platforms/esp/32/rmt_5/idf5_rmt.cpp),
+[asynchronous transmission](https://github.com/FastLED/FastLED/blob/3.10.3/src/platforms/esp/32/rmt_5/strip_rmt.cpp),
+and [temporal dithering](https://github.com/FastLED/FastLED/wiki/FastLED-Temporal-Dithering).
+
 ## Security / Config Mode
+
+The onboard ESP32 RGB LED is green during NORMAL operation and red in
+CONFIG MODE, including calibration and animation tests. It returns to green
+when the device restarts into NORMAL.
 
 Normal boot always enters `NORMAL`. It loads the valid NVS configuration (or
 the safe factory fallback), starts normal PIR/animation behavior, and leaves
@@ -284,9 +524,21 @@ credential, the AP fails closed and remains off.
 Form edits and calibration results are working configuration in RAM. They are
 not written to flash until **Save & restart**. **Reset to defaults** likewise
 loads `18/54/54/54` into the working copy and requires a save to persist it.
-Strip tests stop automatically after 30 seconds or via **Stop test**. All web
+Static strip tests stop automatically after 30 seconds or via **Stop test**. All web
 tests are capped at a safe brightness even when the configured runtime
 brightness is higher.
+
+Firmware 0.2.8 adds **Test with animation** beside each strip. The button applies
+the current form in RAM and runs the existing LEFT animation with only that
+strip visible. Geometry, physical DATA offsets, orientation, waterfall,
+gamma, start delay, cascade timing, hold and fade-out settings are preserved;
+all other sections stay black. A later strip may therefore wait for its place
+in the configured cascade. CONFIG MODE still caps brightness at 96/255 and
+ignores PIR/lux triggers. The test runs one complete cycle or stops through
+**Stop test**, without saving NVS. Its diagnostic capture includes
+`testStripNumber` (1-based; 0 means the full chain), freezes on completion or
+stop, and loads automatically for copying/downloading. DATA still traverses
+the earlier strips, so this test does not electrically isolate a strip.
 
 The panel also provides live LEFT/RIGHT PIR states, BH1750 health/address,
 firmware/build/reset information, uptime, heap and OTA-space diagnostics.
@@ -311,6 +563,10 @@ The JSON API is intentionally small:
 | Method and path | Purpose |
 |---|---|
 | `GET /api/status` | Session time, sensors, firmware/system diagnostics, geometry, and test state |
+| `GET /api/diagnostics` | Bounded RAM diagnostic capture, settings snapshot, frame statistics and events; CONFIG MODE only |
+| `POST /api/diagnostics/run` | Run the temporary fixed diagnostic animation without changing working/NVS settings |
+| `POST /api/diagnostics/mark` | Timestamp the user's observation of flicker |
+| `POST /api/diagnostics/clear` | Clear the RAM capture while no animation test is running |
 | `GET /api/config` | Read the current working configuration |
 | `PUT /api/config` | Validate and replace the working configuration in RAM |
 | `GET /api/config/export` | Download the working configuration as `ledbox-config.json` |
@@ -318,7 +574,7 @@ The JSON API is intentionally small:
 | `POST /api/save` | Validate, persist to NVS, acknowledge, and schedule NORMAL restart |
 | `POST /api/reset` | Load factory defaults into RAM without writing NVS |
 | `POST /api/strip/test` | Start or stop a safe single-strip test |
-| `POST /api/animation/test` | Start a LEFT or RIGHT cascade from the working configuration |
+| `POST /api/animation/test` | Start a LEFT or RIGHT animation; optional `strip` selects one visible strip while preserving configured timing |
 | `POST /api/test/stop` | Stop the active visual test |
 | `POST /api/calibration/{start,move,mark,undo,finish,cancel}` | Drive the shared calibration controller |
 | `POST /api/session/activity` | Refresh the idle timer for real UI interaction |
