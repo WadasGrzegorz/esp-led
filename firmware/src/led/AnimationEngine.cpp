@@ -18,6 +18,8 @@ AnimationEngine::AnimationEngine(LedController& leds,
 void AnimationEngine::begin(const uint32_t nowMs) {
   transitionTo(State::OFF, nowMs, "reset/test/config");
   testStripNumber_ = 0;
+  resumeWaterfallFadeOut_ = false;
+  lastFadeOutElapsedMs_ = 0;
   lastRenderedAtMs_ = UINT32_MAX;
   for (uint8_t stripIndex = 0; stripIndex < MAX_STRIPS; ++stripIndex) {
     stripLevels_[stripIndex] = 0;
@@ -132,6 +134,10 @@ bool AnimationEngine::isOff() const { return state_ == State::OFF; }
 
 void AnimationEngine::startCascade(const Direction direction,
                                    const uint32_t nowMs) {
+  // A Waterfall fade-out leaves different levels within each strip. Keep its
+  // last rendered timeline as a per-pixel baseline when motion reverses it.
+  resumeWaterfallFadeOut_ = state_ == State::FADING_OUT &&
+                            config_.fadeOutStyle == FadeOutStyle::WATERFALL;
   direction_ = direction;
   transitionTo(State::FADING_IN, nowMs,
                state_ == State::FADING_OUT ? "PIR trigger"
@@ -182,18 +188,30 @@ void AnimationEngine::startFadeOut(const uint32_t nowMs) {
        ++stripIndex) {
     fadeOutStartLevels_[stripIndex] = stripLevels_[stripIndex];
   }
+  fadeOutDirection_ = config_.reverseFadeOutOrder
+                          ? (direction_ == Direction::LEFT_TO_RIGHT
+                                 ? Direction::RIGHT_TO_LEFT : Direction::LEFT_TO_RIGHT)
+                          : direction_;
+  resumeWaterfallFadeOut_ = false;
+  lastFadeOutElapsedMs_ = 0;
+  if (config_.fadeOutStyle == FadeOutStyle::WATERFALL) prepareWaterfallFadeOut();
 
   transitionTo(State::FADING_OUT, nowMs, "hold elapsed; both PIRs LOW/test");
-  if (config_.fadeOutStyle == FadeOutStyle::CASCADE) {
-    Serial.print("Cascade fade-out started ");
-    printCascadeName();
-    Serial.println();
-  } else {
+  if (config_.fadeOutStyle == FadeOutStyle::GLOBAL) {
     Serial.println("Global fade-out started");
+    return;
   }
+  Serial.print(config_.fadeOutStyle == FadeOutStyle::WATERFALL
+                   ? "Waterfall fade-out started " : "Cascade fade-out started ");
+  for (uint8_t order = 0; order < config_.stripCount; ++order) {
+    if (order != 0) Serial.print("->");
+    Serial.print(fadeOutStripIndexAt(order) + 1);
+  }
+  Serial.println();
 }
 
 void AnimationEngine::enterOn(const uint32_t nowMs) {
+  resumeWaterfallFadeOut_ = false;
   transitionTo(State::ON, nowMs, "fade-in complete");
 
   for (uint8_t stripIndex = 0; stripIndex < config_.stripCount;
@@ -246,7 +264,7 @@ void AnimationEngine::renderFadeIn(const uint32_t elapsedMs) {
         (levelDistance * progress + FULL_LEVEL / 2) / FULL_LEVEL;
   }
 
-  if (config_.enableWaterfall) {
+  if (config_.enableWaterfall || resumeWaterfallFadeOut_) {
     renderWaterfallFadeIn(elapsedMs);
   } else {
     renderLevels();
@@ -270,16 +288,16 @@ void AnimationEngine::renderWaterfallFadeIn(const uint32_t elapsedMs) {
     const uint32_t startsAtMs = stripFadeInStartedAtMs_[stripIndex];
     const uint32_t durationMs = stripFadeInDurationsMs_[stripIndex];
 
-    if (elapsedMs < startsAtMs) {
+    if (elapsedMs < startsAtMs && !resumeWaterfallFadeOut_) {
       leds_.setRange(stripStartPixel, strip.pixelCount, startLevel);
       stripStartPixel += strip.pixelCount;
       continue;
     }
 
-    const uint32_t stripElapsedMs = elapsedMs - startsAtMs;
-    const uint32_t pixelFadeDurationMs = min(
-        durationMs,
-        scaledDuration(waterfallPixelFadeMs(), FULL_LEVEL - startLevel));
+    const uint32_t stripElapsedMs = elapsedMs < startsAtMs ? 0 : elapsedMs - startsAtMs;
+    const uint32_t pixelFadeDurationMs = config_.enableWaterfall
+        ? min(durationMs, scaledDuration(waterfallPixelFadeMs(), FULL_LEVEL - startLevel))
+        : durationMs;
     const uint32_t travelDurationMs = durationMs - pixelFadeDurationMs;
     const bool reverseLogicalOrder = strip.reversed != bottomToTop;
 
@@ -290,16 +308,20 @@ void AnimationEngine::renderWaterfallFadeIn(const uint32_t elapsedMs) {
               : (static_cast<uint64_t>(travelDurationMs) * order) /
                     (strip.pixelCount - 1);
       const uint8_t progress =
-          stripElapsedMs < pixelStartsAtMs
+          elapsedMs < startsAtMs || stripElapsedMs < pixelStartsAtMs
               ? 0
-              : fadeLevel(stripElapsedMs - pixelStartsAtMs,
-                          pixelFadeDurationMs);
-      const uint16_t levelDistance = FULL_LEVEL - startLevel;
-      const uint8_t level =
-          startLevel +
-          (levelDistance * progress + FULL_LEVEL / 2) / FULL_LEVEL;
+              : (config_.enableWaterfall
+                     ? waterfallFadeLevel(stripElapsedMs - pixelStartsAtMs, pixelFadeDurationMs)
+                     : fadeLevel(stripElapsedMs - pixelStartsAtMs, pixelFadeDurationMs));
       const uint16_t logicalOffset =
           reverseLogicalOrder ? strip.pixelCount - 1 - order : order;
+      const uint8_t pixelStartLevel = resumeWaterfallFadeOut_
+          ? waterfallFadeOutPixelLevel(stripIndex, logicalOffset, lastFadeOutElapsedMs_)
+          : startLevel;
+      const uint16_t levelDistance = FULL_LEVEL - pixelStartLevel;
+      const uint8_t level =
+          pixelStartLevel +
+          (levelDistance * progress + FULL_LEVEL / 2) / FULL_LEVEL;
       leds_.setLogicalPixel(stripStartPixel + logicalOffset, level);
     }
     stripStartPixel += strip.pixelCount;
@@ -309,8 +331,91 @@ void AnimationEngine::renderWaterfallFadeIn(const uint32_t elapsedMs) {
 }
 
 void AnimationEngine::renderFadeOut(const uint32_t elapsedMs) {
+  if (config_.fadeOutStyle == FadeOutStyle::WATERFALL) {
+    renderWaterfallFadeOut(elapsedMs);
+    lastFadeOutElapsedMs_ = elapsedMs;
+    return;
+  }
   updateFadeOutLevels(elapsedMs);
   renderLevels();
+}
+
+void AnimationEngine::prepareWaterfallFadeOut() {
+  uint32_t nextStartMs = 0;
+  uint32_t naturalDurationMs = 1;
+  for (uint8_t order = 0; order < config_.stripCount; ++order) {
+    const uint8_t index = fadeOutStripIndexAt(order);
+    const uint32_t duration = waterfallStripDurationMs(config_.strips[index].pixelCount);
+    stripFadeOutStartedAtMs_[index] = nextStartMs;
+    stripFadeOutDurationsMs_[index] = duration;
+    naturalDurationMs = max(naturalDurationMs, nextStartMs + duration);
+    if (config_.stripStartMode == StripStartMode::CASCADE) {
+      nextStartMs += static_cast<uint32_t>(duration * config_.nextStripStartProgress + 0.5F);
+    }
+  }
+  // Preserve the configured total fade-out time while retaining relative
+  // strip lengths, overlap and the width of each Waterfall transition.
+  for (uint8_t index = 0; index < config_.stripCount; ++index) {
+    const uint32_t naturalStripMs = stripFadeOutDurationsMs_[index];
+    stripFadeOutStartedAtMs_[index] =
+        static_cast<uint64_t>(stripFadeOutStartedAtMs_[index]) * config_.fadeOutMs / naturalDurationMs;
+    const uint32_t scaledStripMs =
+        static_cast<uint64_t>(naturalStripMs) * config_.fadeOutMs / naturalDurationMs;
+    const uint32_t duration = max(uint32_t{1}, scaledStripMs);
+    stripFadeOutDurationsMs_[index] = duration;
+    const uint32_t scaledPixelMs =
+        (static_cast<uint64_t>(waterfallPixelFadeMs()) * duration + naturalStripMs - 1) / naturalStripMs;
+    stripFadeOutPixelFadeMs_[index] = min(duration, max(uint32_t{1}, scaledPixelMs));
+  }
+}
+
+uint8_t AnimationEngine::waterfallFadeOutPixelLevel(const uint8_t stripIndex,
+                                                   const uint16_t logicalOffset,
+                                                   const uint32_t elapsedMs) const {
+  const auto& strip = config_.strips[stripIndex];
+  const uint32_t startsAtMs = stripFadeOutStartedAtMs_[stripIndex];
+  if (elapsedMs < startsAtMs) return fadeOutStartLevels_[stripIndex];
+  const bool bottomToTop = config_.fadeOutWaterfallDirection == WaterfallDirection::BOTTOM_TO_TOP;
+  const uint16_t order = strip.reversed != bottomToTop
+      ? strip.pixelCount - 1 - logicalOffset : logicalOffset;
+  const uint32_t travelMs = stripFadeOutDurationsMs_[stripIndex] - stripFadeOutPixelFadeMs_[stripIndex];
+  const uint32_t pixelStartsAtMs = strip.pixelCount <= 1 ? 0
+      : static_cast<uint64_t>(travelMs) * order / (strip.pixelCount - 1);
+  const uint32_t stripElapsedMs = elapsedMs - startsAtMs;
+  const uint8_t progress = stripElapsedMs < pixelStartsAtMs ? 0
+      : waterfallFadeLevel(stripElapsedMs - pixelStartsAtMs, stripFadeOutPixelFadeMs_[stripIndex]);
+  return (fadeOutStartLevels_[stripIndex] * (FULL_LEVEL - progress) + FULL_LEVEL / 2) / FULL_LEVEL;
+}
+
+void AnimationEngine::renderWaterfallFadeOut(const uint32_t elapsedMs) {
+  uint16_t startPixel = 0;
+  for (uint8_t index = 0; index < config_.stripCount; ++index) {
+    const auto& strip = config_.strips[index];
+    const bool bottomToTop = config_.fadeOutWaterfallDirection == WaterfallDirection::BOTTOM_TO_TOP;
+    const uint16_t firstOffset = strip.reversed != bottomToTop ? strip.pixelCount - 1 : 0;
+    // The first section to fade is the strip's minimum displayed level.
+    stripLevels_[index] = waterfallFadeOutPixelLevel(index, firstOffset, elapsedMs);
+    if (!isStripVisible(index)) {
+      leds_.setRange(startPixel, strip.pixelCount, 0);
+      startPixel += strip.pixelCount;
+      continue;
+    }
+    for (uint16_t offset = 0; offset < strip.pixelCount; ++offset) {
+      leds_.setLogicalPixel(startPixel + offset, waterfallFadeOutPixelLevel(index, offset, elapsedMs));
+    }
+    startPixel += strip.pixelCount;
+  }
+  leds_.show();
+}
+
+uint8_t AnimationEngine::waterfallFadeLevel(const uint32_t elapsedMs,
+                                          const uint32_t durationMs) const {
+  if (config_.waterfallTransitionMs == 0) return fadeLevel(elapsedMs, durationMs);
+  const uint32_t progress = fadeLevel(elapsedMs, durationMs);
+  // Integer smoothstep is monotonic, including at quantization boundaries.
+  const uint32_t denominator = FULL_LEVEL * FULL_LEVEL;
+  const uint32_t numerator = progress * progress * (3 * FULL_LEVEL - 2 * progress);
+  return (numerator + denominator / 2) / denominator;
 }
 
 void AnimationEngine::updateFadeOutLevels(const uint32_t elapsedMs) {
@@ -335,7 +440,7 @@ void AnimationEngine::updateFadeOutLevels(const uint32_t elapsedMs) {
                stripDurationMs * config_.nextStripStartProgress + 0.5F));
   for (uint8_t orderPosition = 0; orderPosition < config_.stripCount;
        ++orderPosition) {
-    const uint8_t stripIndex = stripIndexAt(orderPosition);
+    const uint8_t stripIndex = fadeOutStripIndexAt(orderPosition);
     const uint32_t startsAtMs = stripStartStepMs * orderPosition;
     const uint8_t fadedAmount =
         elapsedMs <= startsAtMs
@@ -398,12 +503,18 @@ bool AnimationEngine::isStripVisible(const uint8_t stripIndex) const {
   return testStripNumber_ == 0 || stripIndex + 1 == testStripNumber_;
 }
 
+uint8_t AnimationEngine::fadeOutStripIndexAt(const uint8_t orderPosition) const {
+  return fadeOutDirection_ == Direction::LEFT_TO_RIGHT
+      ? orderPosition : config_.stripCount - 1 - orderPosition;
+}
+
 uint32_t AnimationEngine::waterfallPixelStepMs() const {
   return max(1UL, (1000UL + config_.waterfallSpeedPps - 1) /
                       config_.waterfallSpeedPps);
 }
 
 uint32_t AnimationEngine::waterfallPixelFadeMs() const {
+  if (config_.waterfallTransitionMs != 0) return config_.waterfallTransitionMs;
   return constrain(waterfallPixelStepMs() * WATERFALL_FADE_WIDTH_PIXELS,
                    MIN_WATERFALL_PIXEL_FADE_MS,
                    MAX_WATERFALL_PIXEL_FADE_MS);

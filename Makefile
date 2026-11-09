@@ -32,6 +32,12 @@ test:
 	.pio/native-test/strip-animation
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
 		-fno-omit-frame-pointer -Itest/native/stubs -Ifirmware \
+		test/native/waterfall_options.cpp firmware/src/config/LightingConfig.cpp \
+		firmware/src/diagnostics/Diagnostics.cpp firmware/src/led/LedController.cpp \
+		firmware/src/led/AnimationEngine.cpp -o .pio/native-test/waterfall-options
+	.pio/native-test/waterfall-options
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
+		-fno-omit-frame-pointer -Itest/native/stubs -Ifirmware \
 		test/native/diagnostics.cpp firmware/src/diagnostics/Diagnostics.cpp \
 		firmware/src/diagnostics/OutputDiagnostic.cpp \
 		firmware/src/config/LightingConfig.cpp firmware/src/led/LedController.cpp \

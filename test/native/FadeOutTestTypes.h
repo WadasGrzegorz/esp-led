@@ -13,4 +13,7 @@ struct FadeOutCase {
   bool continuousHigh;
   uint32_t startMs;
   bool fullBuffer;
+  uint32_t transitionMs = 0;
+  WaterfallDirection fadeOutDirection = WaterfallDirection::TOP_TO_BOTTOM;
+  bool reverseFadeOutOrder = false;
 };

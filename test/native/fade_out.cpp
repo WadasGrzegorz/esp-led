@@ -17,7 +17,7 @@ LightingConfig configuration(const FadeOutCase& test) {
           false, 15.0F,
           {{1, false}, {17, true}, {53, false}, {54, true},
            {static_cast<uint16_t>(test.fullBuffer ? MAX_LOGICAL_PIXELS - 125 : 56), false}},
-          0};
+          0, test.transitionMs, test.fadeOutDirection, test.reverseFadeOutOrder};
 }
 
 uint8_t level(const CRGB* pixels, const uint16_t index) {
@@ -200,7 +200,7 @@ int main() {
     for (const uint8_t brightness : {20, 80, 255}) {
       for (const uint32_t duration : {1000, 2640, 5000}) {
         for (const float gamma : {0.1F, 1.0F, 2.2F, 5.0F}) {
-          for (const auto style : {FadeOutStyle::GLOBAL, FadeOutStyle::CASCADE}) {
+          for (const auto style : {FadeOutStyle::GLOBAL, FadeOutStyle::CASCADE, FadeOutStyle::WATERFALL}) {
             for (const bool high : {false, true}) {
               uninterruptedFade({waterfall, brightness, duration, gamma, style,
                                  StripStartMode::CASCADE, WaterfallDirection::TOP_TO_BOTTOM,
@@ -221,6 +221,19 @@ int main() {
     ++cases;
   }
   pirEdges();
+  for (const bool waterfall : {false, true}) {
+    for (const uint32_t transition : {0, 600, 3000}) {
+      for (const bool reverse : {false, true}) {
+        const FadeOutCase test{waterfall, 80, 2640, 2.2F, FadeOutStyle::WATERFALL,
+                               StripStartMode::CASCADE, WaterfallDirection::BOTTOM_TO_TOP,
+                               true, UINT32_MAX - 21000, true, transition,
+                               WaterfallDirection::BOTTOM_TO_TOP, reverse};
+        uninterruptedFade(test);
+        smoothReversal(test);
+        ++cases;
+      }
+    }
+  }
   pirAnimationFlow();
   std::printf("Fade-out: %zu monotonic cases, reversal, frame ownership and PIR edge tests passed\n", cases);
 }

@@ -54,6 +54,9 @@ void writeConfig(JsonDocument& document, const LightingConfig& config) {
   document["waterfallDirection"] =
       waterfallDirectionName(config.waterfallDirection);
   document["waterfallSpeedPps"] = config.waterfallSpeedPps;
+  document["waterfallTransitionMs"] = config.waterfallTransitionMs;
+  document["fadeOutWaterfallDirection"] = waterfallDirectionName(config.fadeOutWaterfallDirection);
+  document["reverseFadeOutOrder"] = config.reverseFadeOutOrder;
   document["enableLuxGate"] = config.enableLuxGate;
   document["luxThreshold"] = config.luxThreshold;
 
@@ -1013,6 +1016,9 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
   const JsonArrayConst strips = root["strips"].as<JsonArrayConst>();
   const bool legacyV4 = root["configVersion"].is<uint32_t>() &&
                         root["configVersion"].as<uint32_t>() == 4;
+  const bool legacyV5 = root["configVersion"].is<uint32_t>() &&
+                        root["configVersion"].as<uint32_t>() == 5;
+  const bool legacyWaterfallSettings = legacyV4 || legacyV5;
   const bool missingLegacyDelay = legacyV4 && root["startDelayMs"].isNull();
   if (!root["configVersion"].is<uint32_t>() ||
       !root["stripCount"].is<uint32_t>() ||
@@ -1033,6 +1039,13 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     sendError(400, "configuration contains missing or invalid field types");
     return false;
   }
+  if (!legacyWaterfallSettings &&
+      (!root["waterfallTransitionMs"].is<uint32_t>() ||
+       !root["fadeOutWaterfallDirection"].is<const char*>() ||
+       !root["reverseFadeOutOrder"].is<bool>())) {
+    sendError(400, "configuration requires waterfallTransitionMs, fadeOutWaterfallDirection and reverseFadeOutOrder");
+    return false;
+  }
 
   const uint32_t stripCount = root["stripCount"].as<uint32_t>();
   const uint32_t configVersion = root["configVersion"].as<uint32_t>();
@@ -1048,7 +1061,7 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     sendError(422, "strip count must match 1..MAX_STRIPS entries");
     return false;
   }
-  if (configVersion != LIGHTING_CONFIG_VERSION && !legacyV4) {
+  if (configVersion != LIGHTING_CONFIG_VERSION && !legacyWaterfallSettings) {
     sendError(422, "unsupported config version");
     return false;
   }
@@ -1061,13 +1074,19 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
     sendError(422, "unsupported strip start mode");
     return false;
   }
-  if (fadeOutStyle != "global" && fadeOutStyle != "cascade") {
+  if (fadeOutStyle != "global" && fadeOutStyle != "cascade" && fadeOutStyle != "waterfall") {
     sendError(422, "unsupported fade-out style");
     return false;
   }
   if (waterfallDirection != "top-to-bottom" &&
       waterfallDirection != "bottom-to-top") {
     sendError(422, "unsupported waterfall direction");
+    return false;
+  }
+  const String fadeOutWaterfallDirection = legacyWaterfallSettings
+      ? waterfallDirection : root["fadeOutWaterfallDirection"].as<String>();
+  if (fadeOutWaterfallDirection != "top-to-bottom" && fadeOutWaterfallDirection != "bottom-to-top") {
+    sendError(422, "unsupported fade-out waterfall direction");
     return false;
   }
   if (waterfallSpeedPps < MIN_WATERFALL_SPEED_PPS ||
@@ -1092,9 +1111,8 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
                                ? 0
                                : root["startDelayMs"].as<uint32_t>();
   candidate.fadeOutMs = root["fadeOutMs"].as<uint32_t>();
-  candidate.fadeOutStyle = fadeOutStyle == "cascade"
-                               ? FadeOutStyle::CASCADE
-                               : FadeOutStyle::GLOBAL;
+  candidate.fadeOutStyle = fadeOutStyle == "waterfall" ? FadeOutStyle::WATERFALL
+      : fadeOutStyle == "cascade" ? FadeOutStyle::CASCADE : FadeOutStyle::GLOBAL;
   candidate.gamma = root["gamma"].as<float>();
   candidate.enableWaterfall = root["enableWaterfall"].as<bool>();
   candidate.waterfallDirection =
@@ -1103,6 +1121,10 @@ bool WebConfigServer::updateWorkingConfig(const JsonDocument& document) {
           : WaterfallDirection::BOTTOM_TO_TOP;
   candidate.waterfallSpeedPps =
       static_cast<uint16_t>(waterfallSpeedPps);
+  candidate.waterfallTransitionMs = legacyWaterfallSettings ? 0 : root["waterfallTransitionMs"].as<uint32_t>();
+  candidate.fadeOutWaterfallDirection = fadeOutWaterfallDirection == "top-to-bottom"
+      ? WaterfallDirection::TOP_TO_BOTTOM : WaterfallDirection::BOTTOM_TO_TOP;
+  candidate.reverseFadeOutOrder = !legacyWaterfallSettings && root["reverseFadeOutOrder"].as<bool>();
   candidate.enableLuxGate = root["enableLuxGate"].as<bool>();
   candidate.luxThreshold = root["luxThreshold"].as<float>();
 

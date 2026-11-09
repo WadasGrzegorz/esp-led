@@ -27,7 +27,10 @@ struct Mode {
   bool active = true;
   bool isConfigMode() const { return active; }
 };
-struct Settings { uint32_t stripTestTimeoutMs = 30000; };
+struct Settings {
+  uint32_t stripTestTimeoutMs = 30000;
+  uint16_t logicalPixelLimit = MAX_LOGICAL_PIXELS;
+};
 
 class WebConfigServer {
  public:
@@ -60,6 +63,7 @@ class WebConfigServer {
     return true;
   }
   void sendError(int status, const char*) { responseStatus = status; }
+  void sendError(int status, const String&) { responseStatus = status; }
   void sendSetupError(SetupResult) { assert(false); }
   void noteActivity(uint32_t) {}
   void sendOk(const char*) { responseStatus = 200; }
@@ -69,6 +73,7 @@ class WebConfigServer {
   void handleStopTest();
   void updateAnimationTest(uint32_t nowMs);
   void stopVisualActions(uint32_t nowMs, bool includeCalibration);
+  bool updateWorkingConfig(const JsonDocument& document);
 };
 #include "web_strip_handlers.inc"
 
@@ -190,5 +195,39 @@ int main() {
   assert(configuration.get().stripCount == working.stripCount);
   assert(configuration.get().maxBrightness == working.maxBrightness);
   assert(configuration.get().gamma == working.gamma);
+  JsonDocument settings;
+  writeConfig(settings, working);
+  settings["fadeOutStyle"] = "waterfall";
+  settings["waterfallTransitionMs"] = 850;
+  settings["fadeOutWaterfallDirection"] = "bottom-to-top";
+  settings["reverseFadeOutOrder"] = true;
+  assert(server.updateWorkingConfig(settings));
+  assert(configuration.get().fadeOutStyle == FadeOutStyle::WATERFALL);
+  assert(configuration.get().waterfallTransitionMs == 850 && configuration.get().reverseFadeOutOrder);
+  assert(configuration.get().fadeOutWaterfallDirection == WaterfallDirection::BOTTOM_TO_TOP);
+  for (const uint32_t invalid : {1U, 119U, 3001U, UINT32_MAX}) {
+    settings["waterfallTransitionMs"] = invalid;
+    assert(!server.updateWorkingConfig(settings) && server.responseStatus == 422);
+    assert(configuration.get().waterfallTransitionMs == 850);
+  }
+  settings["waterfallTransitionMs"] = 600;
+  settings["fadeOutWaterfallDirection"] = "invalid";
+  assert(!server.updateWorkingConfig(settings) && server.responseStatus == 422);
+  settings["fadeOutWaterfallDirection"] = "top-to-bottom";
+  settings.remove("reverseFadeOutOrder");
+  assert(!server.updateWorkingConfig(settings) && server.responseStatus == 400);
+  // Old exports retain their original behavior when imported by v6.
+  settings["configVersion"] = 5;
+  settings["fadeOutStyle"] = "cascade";
+  settings["waterfallDirection"] = "bottom-to-top";
+  settings.remove("waterfallTransitionMs");
+  settings.remove("fadeOutWaterfallDirection");
+  assert(server.updateWorkingConfig(settings));
+  assert(configuration.get().waterfallTransitionMs == 0 && !configuration.get().reverseFadeOutOrder);
+  assert(configuration.get().fadeOutWaterfallDirection == WaterfallDirection::BOTTOM_TO_TOP);
+  settings["configVersion"] = 4;
+  settings.remove("startDelayMs");
+  assert(server.updateWorkingConfig(settings) && configuration.get().startDelayMs == 0);
+  assert(savedConfig() == before);
   std::puts("Strip animation API: selected/global requests, validation, CONFIG guard, completion, stop, diagnostic/static switching, capture metadata and unchanged NVS passed");
 }

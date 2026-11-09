@@ -36,10 +36,16 @@ class AnimationEngine {
   void renderFadeIn(uint32_t elapsedMs);
   void renderWaterfallFadeIn(uint32_t elapsedMs);
   void renderFadeOut(uint32_t elapsedMs);
+  void prepareWaterfallFadeOut();
+  void renderWaterfallFadeOut(uint32_t elapsedMs);
+  uint8_t waterfallFadeOutPixelLevel(uint8_t stripIndex, uint16_t logicalOffset,
+                                     uint32_t elapsedMs) const;
+  uint8_t waterfallFadeLevel(uint32_t elapsedMs, uint32_t durationMs) const;
   void updateFadeOutLevels(uint32_t elapsedMs);
   void renderLevels();
   void logNewlyStartedStrips(uint32_t elapsedMs);
   uint8_t stripIndexAt(uint8_t orderPosition) const;
+  uint8_t fadeOutStripIndexAt(uint8_t orderPosition) const;
   bool isStripVisible(uint8_t stripIndex) const;
   uint32_t waterfallPixelStepMs() const;
   uint32_t waterfallPixelFadeMs() const;
@@ -60,10 +66,16 @@ class AnimationEngine {
   uint32_t lastRenderedAtMs_ = UINT32_MAX;
   uint32_t cascadeDurationMs_ = 0;
   uint8_t testStripNumber_ = 0;
+  Direction fadeOutDirection_ = Direction::LEFT_TO_RIGHT;
+  bool resumeWaterfallFadeOut_ = false;
+  uint32_t lastFadeOutElapsedMs_ = 0;
   uint8_t stripLevels_[MAX_STRIPS] = {};
   uint8_t fadeInStartLevels_[MAX_STRIPS] = {};
   uint8_t fadeOutStartLevels_[MAX_STRIPS] = {};
   uint32_t stripFadeInStartedAtMs_[MAX_STRIPS] = {};
   uint32_t stripFadeInDurationsMs_[MAX_STRIPS] = {};
+  uint32_t stripFadeOutStartedAtMs_[MAX_STRIPS] = {};
+  uint32_t stripFadeOutDurationsMs_[MAX_STRIPS] = {};
+  uint32_t stripFadeOutPixelFadeMs_[MAX_STRIPS] = {};
   bool stripStartLogged_[MAX_STRIPS] = {};
 };

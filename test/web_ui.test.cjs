@@ -11,10 +11,11 @@ const firmwareCapacity = Number(readFileSync('firmware/src/config/LightingConfig
 const firmwareMaxStrips = Number(readFileSync('firmware/src/config/LightingConfig.h', 'utf8')
   .match(/MAX_STRIPS = (\d+)/)[1]);
 const fixture = {
-  configVersion: 5, stripCount: 1, maxBrightness: 80,
+  configVersion: 6, stripCount: 1, maxBrightness: 80,
   stripFadeInMs: 1680, nextStripStartProgress: 0.8,
   stripStartMode: 'cascade', startDelayMs: 2000, holdMs: 3000,
   fadeOutMs: 2640, fadeOutStyle: 'global', gamma: 2.2,
+  waterfallTransitionMs: 0, fadeOutWaterfallDirection: 'top-to-bottom', reverseFadeOutOrder: false,
   enableWaterfall: true, waterfallDirection: 'top-to-bottom',
   waterfallSpeedPps: 40, enableLuxGate: false, luxThreshold: 15,
   strips: [{ pixelCount: 18, reversed: false }],
@@ -174,6 +175,53 @@ test('whole-chain animation buttons keep the existing request format', async () 
   const request = app.requests.find(item => item.path === '/api/animation/test');
   assert.deepEqual(JSON.parse(request.options.body), { direction: 'right' });
   assert.match(app.elements.diagCapture.textContent, /all strips/);
+});
+
+test('waterfall fade-out and softening are independent options saved with the form', async () => {
+  const app = createUi();
+  await app.evaluate('boot()');
+  assert.equal(app.elements.waterfallSoftening.checked, false);
+  assert.equal(app.evaluate('formConfig().waterfallTransitionMs'), 0);
+  app.elements.waterfallEnabled.checked = false;
+  app.elements.fadeOutStyle.value = 'waterfall';
+  app.elements.fadeOutOrder.value = 'reverse';
+  app.elements.fadeOutWaterfallDirection.value = 'bottom-to-top';
+  app.elements.waterfallSoftening.checked = true;
+  app.elements.waterfallTransition.value = '0.85';
+  app.evaluate('waterfallChanged()');
+  assert.equal(app.elements.waterfallSpeed.disabled, false);
+  assert.equal(app.elements.waterfallDirection.disabled, true);
+  assert.equal(app.elements.fadeIn.disabled, false);
+  assert.equal(app.elements.fadeOutOrder.disabled, false);
+  assert.equal(app.elements.fadeOutWaterfallDirection.disabled, false);
+  assert.equal(app.elements.waterfallTransition.disabled, false);
+  await app.evaluate('applyWorking(true)');
+  const request = app.requests.find(item => item.options?.method === 'PUT');
+  const body = JSON.parse(request.options.body);
+  assert.equal(body.configVersion, 6);
+  assert.equal(body.enableWaterfall, false);
+  assert.equal(body.fadeOutStyle, 'waterfall');
+  assert.equal(body.reverseFadeOutOrder, true);
+  assert.equal(body.fadeOutWaterfallDirection, 'bottom-to-top');
+  assert.equal(body.waterfallTransitionMs, 850);
+});
+
+test('turning softening off restores the original automatic transition', async () => {
+  const app = createUi();
+  await app.evaluate('boot()');
+  app.elements.waterfallTransition.value = '1.5';
+  app.elements.waterfallSoftening.checked = true;
+  assert.equal(app.evaluate('formConfig().waterfallTransitionMs'), 1500);
+  app.elements.waterfallSoftening.checked = false;
+  app.evaluate('waterfallChanged()');
+  assert.equal(app.evaluate('formConfig().waterfallTransitionMs'), 0);
+  assert.equal(app.elements.waterfallTransition.disabled, true);
+  app.elements.fadeOutStyle.value = 'global';
+  app.elements.waterfallEnabled.checked = false;
+  app.evaluate('waterfallChanged()');
+  assert.equal(app.elements.waterfallSoftening.disabled, true);
+  assert.equal(app.elements.fadeOutOrder.disabled, true);
+  assert.equal(app.elements.fadeOutWaterfallDirection.disabled, true);
 });
 
 test('single-strip progress and the automatically loaded report identify the same strip', async () => {
