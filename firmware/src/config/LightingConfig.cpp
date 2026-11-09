@@ -66,7 +66,8 @@ ConfigValidationResult validateLightingConfig(const LightingConfig& config,
     return invalid(ConfigValidationError::FADE_OUT, 0, totalPixelCount);
   }
   if (config.fadeOutStyle != FadeOutStyle::GLOBAL &&
-      config.fadeOutStyle != FadeOutStyle::CASCADE) {
+      config.fadeOutStyle != FadeOutStyle::CASCADE &&
+      config.fadeOutStyle != FadeOutStyle::WATERFALL) {
     return invalid(ConfigValidationError::FADE_OUT_STYLE, 0,
                    totalPixelCount);
   }
@@ -83,6 +84,15 @@ ConfigValidationResult validateLightingConfig(const LightingConfig& config,
       config.waterfallSpeedPps > MAX_WATERFALL_SPEED_PPS) {
     return invalid(ConfigValidationError::WATERFALL_SPEED, 0,
                    totalPixelCount);
+  }
+  if (config.waterfallTransitionMs != 0 &&
+      (config.waterfallTransitionMs < MIN_WATERFALL_TRANSITION_MS ||
+       config.waterfallTransitionMs > MAX_WATERFALL_TRANSITION_MS)) {
+    return invalid(ConfigValidationError::WATERFALL_TRANSITION, 0, totalPixelCount);
+  }
+  if (config.fadeOutWaterfallDirection != WaterfallDirection::TOP_TO_BOTTOM &&
+      config.fadeOutWaterfallDirection != WaterfallDirection::BOTTOM_TO_TOP) {
+    return invalid(ConfigValidationError::FADE_OUT_WATERFALL_DIRECTION, 0, totalPixelCount);
   }
   if (!isfinite(config.luxThreshold) || config.luxThreshold < 0.0F ||
       config.luxThreshold > MAX_LUX_THRESHOLD) {
@@ -127,6 +137,10 @@ const char* configValidationErrorName(const ConfigValidationError error) {
       return "unsupported waterfall direction";
     case ConfigValidationError::WATERFALL_SPEED:
       return "waterfall speed is outside the supported range";
+    case ConfigValidationError::WATERFALL_TRANSITION:
+      return "waterfall transition must be 0 (automatic) or 120..3000 ms";
+    case ConfigValidationError::FADE_OUT_WATERFALL_DIRECTION:
+      return "unsupported fade-out waterfall direction";
     case ConfigValidationError::LUX_THRESHOLD:
       return "lux threshold is outside the supported range";
   }
@@ -140,6 +154,7 @@ const char* waterfallDirectionName(const WaterfallDirection direction) {
 }
 
 const char* fadeOutStyleName(const FadeOutStyle style) {
+  if (style == FadeOutStyle::WATERFALL) return "waterfall";
   return style == FadeOutStyle::CASCADE ? "cascade" : "global";
 }
 

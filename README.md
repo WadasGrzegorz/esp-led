@@ -220,6 +220,32 @@ capacity, invalid geometry, and unavailable capacity metadata.
 
 ## Fade-out diagnostics and regression coverage
 
+The development branch adds optional Waterfall fade-out in firmware 0.3.0-dev.
+Existing **All strips together** and **Whole-strip cascade** fade-outs remain
+available. Choose **Waterfall within strips** for fade-out, then **Same as
+fade-in** to extinguish strips in the PIR-selected travel order, or **Opposite
+to fade-in** to reverse it. Fade-out's top-to-bottom/bottom-to-top direction is
+independent of fade-in and respects each strip's reversed orientation. Waterfall
+fade-out uses the configured strip start mode and overlap, scaled to finish in
+the existing total fade-out time even with unequal lengths.
+
+**Soften waterfall transitions** optionally replaces the original automatic
+120–400 ms transition with a 0.12–3 second per-section fade and a monotonic
+smoothstep curve. A starting value is 0.6 seconds. This widens the blended front;
+it does not enable temporal dithering or change WS2811 transmission timings.
+For fade-out the relative blend width is scaled with the total fade-out time.
+Softening defaults off, and the original modes match the stable 0.2.8 frame
+sequences with the new options disabled. Motion can smoothly reverse a partial
+Waterfall fade-out using each section's last displayed level.
+
+Config schema v6 appends `waterfallTransitionMs` (0 = original automatic
+transition), `fadeOutWaterfallDirection` and `reverseFadeOutOrder`. Existing NVS
+v1–v5 and v4/v5 JSON backups are migrated in RAM without automatic writes.
+Only an explicit save persists v6. Keep an exported v5 backup before saving new
+settings if returning to 0.2.8: that firmware cannot read a v6 configuration.
+The stable PR is #2; its `firmware.bin` remains separate from the development
+image `firmware-waterfall.bin`. Neither image is flashed by building it.
+
 Firmware 0.2.7 fixes encoder quantization: the high segment still uses whole
 ticks, while the low segment fills the rounded-up complete bit period. The
 actual WS2811 configuration becomes 0=300/1000 ns and 1=600/700 ns (1.3 us each).

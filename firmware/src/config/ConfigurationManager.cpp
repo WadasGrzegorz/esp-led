@@ -99,7 +99,8 @@ void ConfigurationManager::begin() {
       storedSize != sizeof(LegacyLightingConfigV1) &&
       storedSize != sizeof(LegacyLightingConfigV2) &&
       storedSize != sizeof(LegacyLightingConfigV3) &&
-      storedSize != sizeof(LegacyLightingConfigV4)) {
+      storedSize != sizeof(LegacyLightingConfigV4) &&
+      storedSize != sizeof(LegacyLightingConfigV5)) {
     preferences.end();
     Serial.println("Config: no compatible saved config, using factory defaults");
     return;
@@ -117,10 +118,14 @@ void ConfigurationManager::begin() {
       MAX_LEGACY_CONFIG_SIZE > sizeof(LegacyLightingConfigV4)
           ? MAX_LEGACY_CONFIG_SIZE
           : sizeof(LegacyLightingConfigV4);
+  constexpr size_t MAX_LEGACY_CONFIG_SIZE_V1_V5 =
+      MAX_LEGACY_CONFIG_SIZE_V1_V4 > sizeof(LegacyLightingConfigV5)
+          ? MAX_LEGACY_CONFIG_SIZE_V1_V4
+          : sizeof(LegacyLightingConfigV5);
   constexpr size_t MAX_STORED_CONFIG_SIZE =
-      sizeof(LightingConfig) > MAX_LEGACY_CONFIG_SIZE_V1_V4
+      sizeof(LightingConfig) > MAX_LEGACY_CONFIG_SIZE_V1_V5
           ? sizeof(LightingConfig)
-          : MAX_LEGACY_CONFIG_SIZE_V1_V4;
+          : MAX_LEGACY_CONFIG_SIZE_V1_V5;
   uint8_t storedBytes[MAX_STORED_CONFIG_SIZE] = {};
   const size_t readSize = preferences.getBytes(
       NVS_CONFIG_KEY, storedBytes, storedSize);
@@ -162,6 +167,12 @@ void ConfigurationManager::begin() {
     storedConfig.configVersion = LIGHTING_CONFIG_VERSION;
     storedConfig.startDelayMs = 0;
     migratedFromVersion = 4;
+  } else if (storedVersion == 5 && storedSize == sizeof(LegacyLightingConfigV5)) {
+    static_assert(offsetof(LightingConfig, waterfallTransitionMs) == sizeof(LegacyLightingConfigV5),
+                  "v5 migration requires an unchanged config prefix");
+    memcpy(&storedConfig, storedBytes, sizeof(LegacyLightingConfigV5));
+    storedConfig.configVersion = LIGHTING_CONFIG_VERSION;
+    migratedFromVersion = 5;
   } else if (storedVersion == LIGHTING_CONFIG_VERSION &&
              storedSize == sizeof(LightingConfig)) {
     memcpy(&storedConfig, storedBytes, sizeof(storedConfig));
@@ -170,6 +181,9 @@ void ConfigurationManager::begin() {
     return;
   }
 
+  if (migratedFromVersion != 0) {
+    storedConfig.fadeOutWaterfallDirection = storedConfig.waterfallDirection;
+  }
   const ConfigValidationResult validation =
       validateLightingConfig(storedConfig, logicalPixelLimit_);
   if (!validation.valid()) {

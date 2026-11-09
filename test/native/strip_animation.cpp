@@ -69,7 +69,7 @@ int main() {
     for (const bool waterfall : {false, true}) {
       for (const auto direction : {Direction::LEFT_TO_RIGHT, Direction::RIGHT_TO_LEFT}) {
         for (const auto startMode : {StripStartMode::CASCADE, StripStartMode::SIMULTANEOUS}) {
-          for (const auto fadeStyle : {FadeOutStyle::GLOBAL, FadeOutStyle::CASCADE}) {
+          for (const auto fadeStyle : {FadeOutStyle::GLOBAL, FadeOutStyle::CASCADE, FadeOutStyle::WATERFALL}) {
             LightingConfig config = DEFAULT_LIGHTING_CONFIG;
             config.stripCount = stripCount;
             config.maxBrightness = 80;

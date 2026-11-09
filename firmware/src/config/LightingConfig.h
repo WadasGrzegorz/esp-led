@@ -2,13 +2,15 @@
 
 #include <Arduino.h>
 
-constexpr uint16_t LIGHTING_CONFIG_VERSION = 5;
+constexpr uint16_t LIGHTING_CONFIG_VERSION = 6;
 constexpr uint32_t MAX_START_DELAY_MS = 60000;
 constexpr uint8_t MAX_STRIPS = 16;
 // Firmware capacity, independent of the user's strip count and lengths.
 constexpr uint16_t MAX_LOGICAL_PIXELS = 720;
 constexpr uint16_t MIN_WATERFALL_SPEED_PPS = 5;
 constexpr uint16_t MAX_WATERFALL_SPEED_PPS = 120;
+constexpr uint32_t MIN_WATERFALL_TRANSITION_MS = 120;
+constexpr uint32_t MAX_WATERFALL_TRANSITION_MS = 3000;
 
 enum class WaterfallDirection : uint8_t {
   TOP_TO_BOTTOM = 0,
@@ -18,6 +20,7 @@ enum class WaterfallDirection : uint8_t {
 enum class FadeOutStyle : uint8_t {
   GLOBAL = 0,
   CASCADE = 1,
+  WATERFALL = 2,
 };
 
 enum class StripStartMode : uint8_t {
@@ -48,6 +51,11 @@ struct LightingConfig {
   float luxThreshold;
   StripConfig strips[MAX_STRIPS];
   uint32_t startDelayMs;
+  // Appended in v6. Zero preserves the exact legacy Waterfall transition.
+  uint32_t waterfallTransitionMs = 0;
+  WaterfallDirection fadeOutWaterfallDirection = WaterfallDirection::TOP_TO_BOTTOM;
+  bool reverseFadeOutOrder = false;
+  uint16_t reserved = 0;  // Explicit tail bytes keep the raw NVS layout deterministic.
 };
 
 enum class ConfigValidationError : uint8_t {
@@ -67,6 +75,8 @@ enum class ConfigValidationError : uint8_t {
   GAMMA,
   WATERFALL_DIRECTION,
   WATERFALL_SPEED,
+  WATERFALL_TRANSITION,
+  FADE_OUT_WATERFALL_DIRECTION,
   LUX_THRESHOLD,
 };
 

@@ -31,11 +31,17 @@ class StripAnimationOutputTest(unittest.TestCase):
             "void WebConfigServer::handleStopTest()",
             "void WebConfigServer::updateAnimationTest(",
             "void WebConfigServer::stopVisualActions(",
+            "bool WebConfigServer::updateWorkingConfig(",
         ]
         with tempfile.TemporaryDirectory(prefix="ledbox-strip-api-") as folder:
             temporary = Path(folder)
+            methods = "\n\n".join(braced(web, signature) for signature in signatures)
+            # Native IO uses std::string instead of Arduino String. Only adapt
+            # its numeric constructors; all validation logic remains actual.
+            for expression in ("index + 1", "settings_.logicalPixelLimit", "validation.stripIndex + 1"):
+                methods = methods.replace(f"String({expression})", f"std::to_string({expression})")
             (temporary / "web_strip_handlers.inc").write_text(
-                "\n\n".join(braced(web, signature) for signature in signatures)
+                braced(web, "void writeConfig(") + "\n\n" + methods
             )
             binary = temporary / "strip-api"
             compilation = subprocess.run([

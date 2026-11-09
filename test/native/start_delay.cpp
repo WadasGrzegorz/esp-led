@@ -1,4 +1,6 @@
+#include <array>
 #include <cassert>
+#include <cstring>
 #include <cstdio>
 
 #include <Preferences.h>
@@ -163,6 +165,49 @@ void configurationPersistence() {
   assert(reloaded.restoreFactoryDefaults().valid());
   assert(reloaded.get().startDelayMs == 0);
 }
+
+void stableV5Migration() {
+  const LegacyLightingConfigV5 legacy{
+      5, 5, 80, 1680, 0.6F, StripStartMode::CASCADE, 3000, 5000,
+      FadeOutStyle::CASCADE, 2.2F, true, WaterfallDirection::BOTTOM_TO_TOP,
+      53, false, 15.0F,
+      {{54, true}, {36, true}, {54, true}, {36, true}, {54, true}}, 2345};
+  Preferences preferences;
+  preferences.putBytes("config", &legacy, sizeof(legacy));
+  ConfigurationManager configuration(DEFAULT_LIGHTING_CONFIG, MAX_LOGICAL_PIXELS);
+  configuration.begin();
+  const auto& loaded = configuration.get();
+  assert(loaded.configVersion == LIGHTING_CONFIG_VERSION);
+  assert(loaded.startDelayMs == 2345 && loaded.fadeOutStyle == FadeOutStyle::CASCADE);
+  assert(loaded.waterfallTransitionMs == 0 && !loaded.reverseFadeOutOrder);
+  assert(loaded.fadeOutWaterfallDirection == WaterfallDirection::BOTTOM_TO_TOP);
+  const auto* prefix = reinterpret_cast<const uint8_t*>(&loaded);
+  const auto* previous = reinterpret_cast<const uint8_t*>(&legacy);
+  assert(std::memcmp(prefix + sizeof(legacy.configVersion), previous + sizeof(legacy.configVersion),
+                     sizeof(legacy) - sizeof(legacy.configVersion)) == 0);
+  std::array<uint8_t, sizeof(legacy)> stored{};
+  assert(preferences.getBytesLength("config") == sizeof(legacy));
+  preferences.getBytes("config", stored.data(), stored.size());
+  assert(std::memcmp(stored.data(), &legacy, sizeof(legacy)) == 0);
+
+  LightingConfig updated = loaded;
+  updated.fadeOutStyle = FadeOutStyle::WATERFALL;
+  updated.reverseFadeOutOrder = true;
+  updated.waterfallTransitionMs = 600;
+  assert(configuration.update(updated).valid() && configuration.save());
+  ConfigurationManager reloaded(DEFAULT_LIGHTING_CONFIG, MAX_LOGICAL_PIXELS);
+  reloaded.begin();
+  assert(reloaded.get().fadeOutStyle == FadeOutStyle::WATERFALL);
+  assert(reloaded.get().waterfallTransitionMs == 600 && reloaded.get().reverseFadeOutOrder);
+  assert(reloaded.get().startDelayMs == 2345 && configuredPixelCount(reloaded.get()) == 234);
+  updated.waterfallTransitionMs = MIN_WATERFALL_TRANSITION_MS - 1;
+  assert(configuration.validate(updated).error == ConfigValidationError::WATERFALL_TRANSITION);
+  updated.waterfallTransitionMs = MAX_WATERFALL_TRANSITION_MS + 1;
+  assert(configuration.validate(updated).error == ConfigValidationError::WATERFALL_TRANSITION);
+  updated.waterfallTransitionMs = 0;
+  updated.fadeOutWaterfallDirection = static_cast<WaterfallDirection>(99);
+  assert(configuration.validate(updated).error == ConfigValidationError::FADE_OUT_WATERFALL_DIRECTION);
+}
 }  // namespace
 
 int main() {
@@ -178,5 +223,6 @@ int main() {
   millisRollover();
   lateUpdateKeepsFullAnimation();
   configurationPersistence();
+  stableV5Migration();
   std::puts("Start delay: animation, timing, validation and NVS tests passed");
 }
